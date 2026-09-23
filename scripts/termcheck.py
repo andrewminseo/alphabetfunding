@@ -13,6 +13,7 @@ Checks:
   - yield recomputed from price, coupon, and dates must match the stated yield
   - spread must equal issue yield minus benchmark yield
   - net proceeds must equal principal x (price - underwriting discount)
+  - currency must match the symbol or code right before the principal amount
   - required fields present, maturity after settlement, values in sane ranges
 
 Yield convention: dated date = settlement date (new issue, no accrued interest),
@@ -209,6 +210,31 @@ def find_number(text: str, value) -> str | None:
     return None
 
 
+# Longest first, so "C$" wins over "$".
+CURRENCY_MARKERS = [("C$", "CAD"), ("CHF", "CHF"), ("JPY", "JPY"), ("$", "USD"),
+                    ("€", "EUR"), ("£", "GBP"), ("¥", "JPY")]
+
+
+def currency_before_number(text: str, value) -> tuple[str | None, str | None]:
+    """(currency code, snippet) from the symbol or code immediately before the
+    first occurrence of `value` that has one. (None, None) if none do."""
+    try:
+        target = Decimal(str(value))
+    except InvalidOperation:
+        return None, None
+    for m in _NUM_RE.finditer(text):
+        n = Decimal(m.group(1).replace(",", "") + (m.group(2) or ""))
+        scale = (m.group(3) or "").strip().lower()
+        n *= {"million": 1_000_000, "billion": 1_000_000_000}.get(scale, 1)
+        if n != target:
+            continue
+        before = text[max(0, m.start() - 6):m.start()].rstrip()
+        for marker, code in CURRENCY_MARKERS:
+            if before.upper().endswith(marker):
+                return code, _snippet(text, m.start(), m.end())
+    return None, None
+
+
 def find_date(text: str, value) -> str | None:
     d = _to_date(value)
     month = d.strftime("%B")
@@ -294,6 +320,15 @@ def check_tranche(tranche: dict, text: str, *, currency: str, settlement_date,
         r.evidence[f] = ev
         if ev is None:
             r.add(FAIL, f, f"{t[f]} not found in filing text")
+
+    # Currency: symbol or code right before the principal amount
+    if currency and t.get("principal") is not None and r.evidence.get("principal"):
+        found, ev = currency_before_number(text, t["principal"])
+        r.evidence["currency"] = ev
+        if found is None:
+            r.add(WARN, "currency", "no currency symbol before the principal amount")
+        elif found != currency:
+            r.add(FAIL, "currency", f"extracted {currency} but principal is shown in {found}")
 
     # Identifiers
     if t.get("cusip") and not valid_cusip(t["cusip"]):

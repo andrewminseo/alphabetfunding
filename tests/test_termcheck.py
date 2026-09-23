@@ -82,3 +82,36 @@ def test_number_absent_from_text_fails_grounding():
     assert any(i.field == "issue_yield_pct" and "not found" in i.message for i in r.issues)
     assert r.evidence["principal"] is not None
     assert r.evidence["issue_yield_pct"] is None
+
+
+CUR_TRANCHE = {"rate_type": "fixed", "principal": 750000000, "coupon_pct": 4.0,
+               "maturity_date": "2030-05-15"}
+
+
+def currency_issues(text: str, currency: str) -> tuple[str, list]:
+    r = tc.check_tranche(CUR_TRANCHE, text + " | 4.000% | May 15, 2030",
+                         currency=currency, settlement_date=SETTLE, freq=2)
+    return r.status, [i for i in r.issues if i.field == "currency"]
+
+
+@pytest.mark.parametrize("text,currency", [
+    ("2030 Notes: $750,000,000", "USD"),
+    ("2030 Notes: €750,000,000", "EUR"),
+    ("2030 Notes: C$750,000,000", "CAD"),
+    ("2030 Notes: CHF 750,000,000", "CHF"),
+])
+def test_currency_symbol_matches(text, currency):
+    status, issues = currency_issues(text, currency)
+    assert issues == [], issues
+
+
+def test_currency_symbol_mismatch_fails():
+    status, issues = currency_issues("2030 Notes: €750,000,000", "USD")
+    assert status == tc.FAIL
+    assert issues and issues[0].level == tc.FAIL
+
+
+def test_currency_symbol_missing_warns():
+    status, issues = currency_issues("2030 Notes: 750,000,000", "USD")
+    assert status == tc.WARN
+    assert issues and issues[0].level == tc.WARN
