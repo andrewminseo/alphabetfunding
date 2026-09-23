@@ -1,0 +1,363 @@
+"""
+termcheck.py
+
+Deterministic checks for bond terms extracted from a filing. No network, no LLM.
+
+Every tranche an extractor produces goes through check_tranche(), which returns
+PASS / WARN / FAIL plus a list of issues and, for each field, the snippet of the
+source text where its value was found (the evidence).
+
+Checks:
+  - grounding: every number, date, and identifier must appear in the source text
+  - CUSIP and ISIN check digits, and ISIN must embed the CUSIP for US ISINs
+  - yield recomputed from price, coupon, and dates must match the stated yield
+  - spread must equal issue yield minus benchmark yield
+  - net proceeds must equal principal x (price - underwriting discount)
+  - required fields present, maturity after settlement, values in sane ranges
+
+Yield convention: dated date = settlement date (new issue, no accrued interest),
+coupons on a regular schedule rolled back from maturity, first coupon prorated,
+compounding at the coupon frequency. 30/360 for USD, ACT/ACT (ICMA) otherwise.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from datetime import date
+from decimal import Decimal, InvalidOperation
+
+PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
+
+# Tolerances, in basis points unless noted.
+YIELD_OK_BP, YIELD_WARN_BP = 1.0, 3.0
+SPREAD_OK_BP, SPREAD_WARN_BP = 1.0, 3.0
+PROCEEDS_TOL = 1e-4  # fraction of principal
+
+NUMERIC_FIELDS = [
+    "principal", "coupon_pct", "issue_price_pct", "underwriting_discount_pct",
+    "net_proceeds", "issue_yield_pct", "spread_bps", "benchmark_yield_pct",
+    "floating_margin_bps",
+]
+DATE_FIELDS = ["maturity_date"]
+ID_FIELDS = ["cusip", "isin"]
+
+
+@dataclass
+class Issue:
+    level: str   # WARN or FAIL
+    field: str
+    message: str
+
+
+@dataclass
+class CheckResult:
+    status: str = PASS
+    issues: list[Issue] = field(default_factory=list)
+    evidence: dict[str, str | None] = field(default_factory=dict)
+
+    def add(self, level: str, fld: str, message: str) -> None:
+        self.issues.append(Issue(level, fld, message))
+        if level == FAIL or (level == WARN and self.status == PASS):
+            self.status = level
+
+
+# --------------------------------------------------------------------------
+# Identifiers
+# --------------------------------------------------------------------------
+
+def _char_value(c: str) -> int:
+    if c.isdigit():
+        return int(c)
+    if c.isalpha():
+        return ord(c.upper()) - ord("A") + 10
+    return {"*": 36, "@": 37, "#": 38}[c]
+
+
+def cusip_check_digit(base8: str) -> str:
+    total = 0
+    for i, c in enumerate(base8.upper()):
+        v = _char_value(c)
+        if i % 2 == 1:
+            v *= 2
+        total += v // 10 + v % 10
+    return str((10 - total % 10) % 10)
+
+
+def valid_cusip(cusip: str) -> bool:
+    c = re.sub(r"\s", "", cusip or "").upper()
+    return bool(re.fullmatch(r"[0-9A-Z*@#]{8}[0-9]", c)) and cusip_check_digit(c[:8]) == c[8]
+
+
+def valid_isin(isin: str) -> bool:
+    s = re.sub(r"\s", "", isin or "").upper()
+    if not re.fullmatch(r"[A-Z]{2}[0-9A-Z]{9}[0-9]", s):
+        return False
+    digits = "".join(str(_char_value(c)) for c in s[:-1])
+    total = 0
+    for i, d in enumerate(reversed(digits)):
+        v = int(d) * (2 if i % 2 == 0 else 1)
+        total += v // 10 + v % 10
+    return str((10 - total % 10) % 10) == s[-1]
+
+
+# --------------------------------------------------------------------------
+# Yield math
+# --------------------------------------------------------------------------
+
+def _to_date(d) -> date:
+    return d if isinstance(d, date) else date.fromisoformat(str(d)[:10])
+
+
+def _add_months(d: date, months: int) -> date:
+    y, m = divmod(d.month - 1 + months, 12)
+    y += d.year
+    m += 1
+    for day in (d.day, 30, 29, 28):
+        try:
+            return date(y, m, day)
+        except ValueError:
+            continue
+    raise ValueError(d)
+
+
+def _days_30360(a: date, b: date) -> int:
+    d1 = min(a.day, 30)
+    d2 = b.day if (b.day < 31 or d1 < 30) else 30
+    return 360 * (b.year - a.year) + 30 * (b.month - a.month) + (d2 - d1)
+
+
+def _schedule(settle: date, maturity: date, freq: int) -> tuple[date, list[date]]:
+    """Previous quasi-coupon date and coupon dates after settlement."""
+    step = 12 // freq
+    dates = [maturity]
+    n = 0
+    while dates[-1] > settle:
+        n += 1
+        dates.append(_add_months(maturity, -step * n))
+    prev = dates[-1]
+    return prev, sorted(dates[:-1])
+
+
+def price_from_yield(yield_pct: float, coupon_pct: float, settle, maturity,
+                     freq: int = 2, day_count: str = "30/360") -> float:
+    settle, maturity = _to_date(settle), _to_date(maturity)
+    prev, coupons = _schedule(settle, maturity, freq)
+    nxt = coupons[0]
+    if day_count == "30/360":
+        frac = _days_30360(settle, nxt) / (360 / freq)
+    else:
+        frac = (nxt - settle).days / (nxt - prev).days
+    c = coupon_pct / freq
+    y = yield_pct / 100 / freq
+    pv = 0.0
+    for k, _ in enumerate(coupons):
+        t = frac + k
+        cf = c * frac if k == 0 else c
+        if k == len(coupons) - 1:
+            cf += 100
+        pv += cf / (1 + y) ** t
+    return pv
+
+
+def yield_from_price(price_pct: float, coupon_pct: float, settle, maturity,
+                     freq: int = 2, day_count: str = "30/360") -> float:
+    """Yield to maturity in percent, by bisection."""
+    lo, hi = -5.0, 50.0
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        if price_from_yield(mid, coupon_pct, settle, maturity, freq, day_count) > price_pct:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+# --------------------------------------------------------------------------
+# Grounding
+# --------------------------------------------------------------------------
+
+_NUM_RE = re.compile(
+    r"(?<![\w.])(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?(?!\d)(\s*(?:million|billion))?",
+    re.IGNORECASE,
+)
+
+
+def normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").replace("\xa0", " "))
+
+
+def _snippet(text: str, start: int, end: int, pad: int = 60) -> str:
+    return text[max(0, start - pad):min(len(text), end + pad)].strip()
+
+
+def find_number(text: str, value) -> str | None:
+    """Snippet around the first occurrence of `value` as a number in text."""
+    try:
+        target = Decimal(str(value))
+    except InvalidOperation:
+        return None
+    for m in _NUM_RE.finditer(text):
+        n = Decimal(m.group(1).replace(",", "") + (m.group(2) or ""))
+        scale = (m.group(3) or "").strip().lower()
+        if scale == "million":
+            n *= 1_000_000
+        elif scale == "billion":
+            n *= 1_000_000_000
+        if n == target:
+            return _snippet(text, m.start(), m.end())
+    return None
+
+
+def find_date(text: str, value) -> str | None:
+    d = _to_date(value)
+    month = d.strftime("%B")
+    patterns = [
+        rf"{month}\s+{d.day},?\s+{d.year}",
+        rf"{d.day}\s+{month},?\s+{d.year}",
+        re.escape(d.isoformat()),
+    ]
+    for p in patterns:
+        m = re.search(p, text, re.IGNORECASE)
+        if m:
+            return _snippet(text, m.start(), m.end())
+    return None
+
+
+def find_identifier(text: str, value: str) -> str | None:
+    """Match an identifier even if the filing splits it with spaces (02079K AK3)."""
+    ident = re.sub(r"\s", "", value).upper()
+    pattern = r"\s?".join(re.escape(c) for c in ident)
+    m = re.search(pattern, text, re.IGNORECASE)
+    return _snippet(text, m.start(), m.end()) if m else None
+
+
+# --------------------------------------------------------------------------
+# The check
+# --------------------------------------------------------------------------
+
+def _num(x):
+    return None if x is None else float(x)
+
+
+def check_tranche(tranche: dict, text: str, *, currency: str, settlement_date,
+                  freq: int, day_count: str | None = None) -> CheckResult:
+    """Check one extracted tranche against its source text.
+
+    tranche: dict with the extractor's per-tranche fields (principal, coupon_pct,
+      maturity_date, issue_price_pct, underwriting_discount_pct, net_proceeds,
+      issue_yield_pct, spread_bps, benchmark_yield_pct, floating_index,
+      floating_margin_bps, cusip, isin, rate_type). Missing keys count as null.
+    text: the filing text the values were extracted from.
+    """
+    r = CheckResult()
+    t = {k: tranche.get(k) for k in set(tranche) | set(NUMERIC_FIELDS + DATE_FIELDS + ID_FIELDS)}
+    text = normalize_text(text)
+    currency = (currency or "").upper()
+    day_count = day_count or ("30/360" if currency == "USD" else "ACT/ACT")
+    floating = (t.get("rate_type") or "").lower() == "floating"
+
+    # Required fields
+    if not currency:
+        r.add(FAIL, "currency", "missing")
+    if not settlement_date:
+        r.add(FAIL, "settlement_date", "missing")
+    for f in ["principal", "maturity_date"] + ([] if floating else ["coupon_pct"]):
+        if t.get(f) is None:
+            r.add(FAIL, f, "missing")
+    if floating and not t.get("floating_index"):
+        r.add(FAIL, "floating_index", "floating note without an index")
+
+    # Grounding
+    for f in NUMERIC_FIELDS:
+        if t.get(f) is None:
+            continue
+        ev = find_number(text, t[f])
+        r.evidence[f] = ev
+        if ev is None:
+            r.add(FAIL, f, f"value {t[f]} not found in filing text")
+    for f in DATE_FIELDS:
+        if t.get(f) is None:
+            continue
+        try:
+            ev = find_date(text, t[f])
+        except ValueError:
+            r.add(FAIL, f, f"not an ISO date: {t[f]!r}")
+            continue
+        r.evidence[f] = ev
+        if ev is None:
+            r.add(FAIL, f, f"date {t[f]} not found in filing text")
+    for f in ID_FIELDS:
+        if not t.get(f):
+            continue
+        ev = find_identifier(text, t[f])
+        r.evidence[f] = ev
+        if ev is None:
+            r.add(FAIL, f, f"{t[f]} not found in filing text")
+
+    # Identifiers
+    if t.get("cusip") and not valid_cusip(t["cusip"]):
+        r.add(FAIL, "cusip", f"bad check digit: {t['cusip']}")
+    if t.get("isin"):
+        if not valid_isin(t["isin"]):
+            r.add(FAIL, "isin", f"bad check digit: {t['isin']}")
+        elif t.get("cusip") and t["isin"].upper().startswith("US"):
+            if t["isin"].upper()[2:11] != re.sub(r"\s", "", t["cusip"]).upper():
+                r.add(FAIL, "isin", "ISIN does not embed the CUSIP")
+
+    # Dates
+    settle = mat = None
+    try:
+        settle = _to_date(settlement_date) if settlement_date else None
+        mat = _to_date(t["maturity_date"]) if t.get("maturity_date") else None
+    except ValueError:
+        pass
+    if settle and mat and mat <= settle:
+        r.add(FAIL, "maturity_date", "maturity is not after settlement")
+
+    # Ranges
+    price, cpn, yld = _num(t.get("issue_price_pct")), _num(t.get("coupon_pct")), _num(t.get("issue_yield_pct"))
+    if price is not None and not 90 <= price <= 101:
+        r.add(WARN, "issue_price_pct", f"unusual issue price {price}")
+    if cpn is not None and not 0 <= cpn <= 15:
+        r.add(FAIL, "coupon_pct", f"implausible coupon {cpn}")
+    if _num(t.get("principal")) is not None and t["principal"] <= 0:
+        r.add(FAIL, "principal", "non-positive principal")
+
+    # Yield from price
+    if not floating and None not in (price, cpn, settle, mat) and mat > settle:
+        calc = yield_from_price(price, cpn, settle, mat, freq, day_count)
+        r.evidence["yield_from_price"] = f"{calc:.4f}"
+        if yld is None:
+            r.add(WARN, "issue_yield_pct", f"no stated yield; price implies {calc:.3f}")
+        else:
+            diff = abs(calc - yld) * 100
+            if diff > YIELD_WARN_BP:
+                r.add(FAIL, "issue_yield_pct", f"stated {yld} vs {calc:.3f} from price ({diff:.1f} bp)")
+            elif diff > YIELD_OK_BP:
+                r.add(WARN, "issue_yield_pct", f"stated {yld} vs {calc:.3f} from price ({diff:.1f} bp)")
+    elif not floating and price is None:
+        r.add(WARN, "issue_price_pct", "no issue price; yield not verifiable")
+
+    # Spread = yield - benchmark yield
+    spread, bmk = _num(t.get("spread_bps")), _num(t.get("benchmark_yield_pct"))
+    if None not in (spread, bmk, yld):
+        implied = (yld - bmk) * 100
+        r.evidence["spread_from_yields"] = f"{implied:.1f}"
+        diff = abs(implied - spread)
+        if diff > SPREAD_WARN_BP:
+            r.add(FAIL, "spread_bps", f"stated {spread:g} bp vs yield - benchmark = {implied:.1f} bp")
+        elif diff > SPREAD_OK_BP:
+            r.add(WARN, "spread_bps", f"stated {spread:g} bp vs yield - benchmark = {implied:.1f} bp")
+    elif spread is not None and not floating:
+        r.add(WARN, "spread_bps", "spread not verifiable (missing yield or benchmark yield)")
+
+    # Net proceeds
+    prin, disc, net = _num(t.get("principal")), _num(t.get("underwriting_discount_pct")), _num(t.get("net_proceeds"))
+    if None not in (prin, price, disc, net):
+        calc = prin * (price - disc) / 100
+        r.evidence["net_proceeds_calc"] = f"{calc:,.2f}"
+        if abs(calc - net) > prin * PROCEEDS_TOL:
+            r.add(FAIL, "net_proceeds", f"stated {net:,.0f} vs principal x (price - discount) = {calc:,.0f}")
+
+    return r

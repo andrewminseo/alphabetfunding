@@ -1,0 +1,8 @@
+tranche_id,issuer,currency,principal_local,coupon_pct,issue_date,maturity_date,rate_type,secured,source_filing,source_url,notes
+S-USD-01,Alphabet Inc.,USD,1000000000,1.00,2020-08-05,2027-08-15,fixed,unsecured,SAMPLE,,ILLUSTRATIVE ONLY - not real data
+S-USD-02,Alphabet Inc.,USD,2500000000,4.00,2025-05-01,2030-05-15,fixed,unsecured,SAMPLE,,ILLUSTRATIVE ONLY - not real data
+S-USD-03,Alphabet Inc.,USD,3000000000,5.25,2025-11-01,2055-11-15,fixed,unsecured,SAMPLE,,ILLUSTRATIVE ONLY - not real data
+S-EUR-01,Alphabet Inc.,EUR,2000000000,3.00,2025-11-01,2033-11-15,fixed,unsecured,SAMPLE,,ILLUSTRATIVE ONLY - not real data
+S-GBP-01,Alphabet Inc.,GBP,1500000000,5.50,2026-02-01,2056-02-15,fixed,unsecured,SAMPLE,,ILLUSTRATIVE ONLY - not real data
+S-CHF-01,Alphabet Inc.,CHF,1000000000,1.00,2026-02-01,2031-02-15,fixed,unsecured,SAMPLE,,ILLUSTRATIVE ONLY - not real data
+S-JPY-01,Alphabet Inc.,JPY,150000000000,1.50,2026-05-01,2036-05-15,fixed,unsecured,SAMPLE,,ILLUSTRATIVE ONLY - not real data
