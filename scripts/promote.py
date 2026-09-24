@@ -2,8 +2,10 @@
 promote.py
 
 Moves reviewed rows from data/tranches_pending.csv into data/tranches.csv.
-A row moves only if approved == "yes" and status != "FAIL". Only the 16
-tranches.csv columns are kept. Rows already in tranches.csv (same tranche_id,
+A row moves only if approved == "yes" and status != "FAIL". Only the
+tranches.csv columns (BASE_COLS: the original 16 plus floating_margin_bps) are
+kept; a tranches.csv without floating_margin_bps gets the column added, blank
+for existing rows. Rows already in tranches.csv (same tranche_id,
 or same currency + maturity_date + coupon) are skipped and left in pending.
 
 Usage:
@@ -31,6 +33,12 @@ def main() -> None:
         sys.exit(f"No {PENDING.name}.")
     pending = pd.read_csv(PENDING, dtype=str).fillna("")
     db = pd.read_csv(TRANCHES, dtype=str).fillna("")
+    for c in BASE_COLS:
+        if c not in db.columns:
+            db[c] = ""
+    for c in BASE_COLS:
+        if c not in pending.columns:
+            pending[c] = ""
 
     approved = pending["approved"].str.strip().str.lower() == "yes"
     passing = pending["status"].str.strip().str.upper() != "FAIL"

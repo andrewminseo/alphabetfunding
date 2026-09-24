@@ -49,7 +49,7 @@ BASE_COLS = [
     "tranche_id", "issuer", "currency", "principal_local", "coupon_pct",
     "issue_price_pct", "issue_yield_pct", "benchmark", "issue_spread_bps",
     "issue_date", "maturity_date", "rate_type", "secured", "source_filing",
-    "source_url", "notes",
+    "source_url", "notes", "floating_margin_bps",
 ]
 EXTRA_COLS = [
     "cusip", "isin", "benchmark_yield_pct", "underwriting_discount_pct",
@@ -259,6 +259,7 @@ def build_row(deal: Deal, t: Tranche, result: termcheck.CheckResult,
         "source_filing": f"FWP {deal.trade_date}" if deal.trade_date else "FWP",
         "source_url": url,
         "notes": ranking,
+        "floating_margin_bps": num(t.floating_margin_bps),
         "cusip": re.sub(r"\s", "", t.cusip or ""),
         "isin": re.sub(r"\s", "", t.isin or ""),
         "benchmark_yield_pct": num(t.benchmark_yield_pct, "{:.3f}"),
@@ -360,15 +361,16 @@ def compare_golden(rows: list[dict], golden_path: Path) -> list[str]:
 # Main
 # --------------------------------------------------------------------------
 
-def print_summary(row: dict, dup: bool) -> None:
+def print_summary(row: dict, dup: bool, issues: list) -> None:
     tag = row["status"] + ("  DUPLICATE (already in tranches.csv)" if dup else "")
     print(f"  {row['tranche_id'] or '(no id)':<26} {tag}")
     print(f"    {row['currency']} {row['principal_local']}  cpn {row['coupon_pct']}  "
           f"px {row['issue_price_pct']}  yld {row['issue_yield_pct']}  "
           f"spr {row['issue_spread_bps']}  mat {row['maturity_date']}")
-    print(f"    bmk {row['benchmark']} @ {row['benchmark_yield_pct']}  cusip {row['cusip']}")
-    for issue in filter(None, row["issues"].split("; ")):
-        print(f"    - {issue}")
+    print(f"    bmk {row['benchmark']} @ {row['benchmark_yield_pct']}  cusip {row['cusip']}"
+          + (f"  margin {row['floating_margin_bps']} bp" if row["floating_margin_bps"] else ""))
+    for i in issues:
+        print(f"    - {i.level} {i.field}: {i.message}")
 
 
 def process(url: str, args, pending_keys: set, db_keys: set,
@@ -399,7 +401,7 @@ def process(url: str, args, pending_keys: set, db_keys: set,
         rows.append(row)
         key = dedup_key(currency, row["maturity_date"], row["coupon_pct"])
         dup = key in db_keys
-        print_summary(row, dup)
+        print_summary(row, dup, result.issues)
         audit_tranches.append({"series_label": t.series_label, "tranche_id": row["tranche_id"],
                                "status": result.status, "duplicate": dup,
                                "issues": [asdict(i) for i in result.issues],

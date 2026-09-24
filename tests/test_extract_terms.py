@@ -80,3 +80,22 @@ def test_already_processed_fwps_are_skipped(tmp_path):
 def test_nothing_skipped_with_empty_audit(tmp_path):
     todo, skipped = et.split_processed([URL_A, URL_B], et.processed_accessions(tmp_path / "none.jsonl"))
     assert todo == [URL_A, URL_B] and skipped == []
+
+
+def test_build_row_carries_floating_margin():
+    deal = et.Deal(issuer="Alphabet Inc.", currency="USD", trade_date="2025-11-03",
+                   settlement_date="2025-11-06", ranking="Senior unsecured",
+                   benchmark_type="Treasury", tranches=[])
+    t = et.Tranche(**{f: None for f in et.Tranche.model_fields} | {
+        "rate_type": "floating", "maturity_date": "2028-11-15", "floating_margin_bps": 52})
+    row = et.build_row(deal, t, tc.CheckResult(), "https://x/1652044/000119312525263045/d.htm", "m", "UST")
+    assert row["floating_margin_bps"] == "52"
+    assert row["tranche_id"].endswith("-FRN")
+
+
+def test_console_summary_keeps_issue_messages_whole(capsys):
+    row = {c: "" for c in et.PENDING_COLS} | {"tranche_id": "GOOGL-2026-08-2028", "status": "WARN"}
+    issues = [tc.Issue("WARN", "spread_bps", "spread missing; yield minus benchmark = 33.0 bp")]
+    et.print_summary(row, False, issues)
+    out = capsys.readouterr().out
+    assert "    - WARN spread_bps: spread missing; yield minus benchmark = 33.0 bp\n" in out

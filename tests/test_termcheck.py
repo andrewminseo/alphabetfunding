@@ -14,18 +14,28 @@ import termcheck as tc  # noqa: E402
 SETTLE = "2025-05-01"
 GOLDEN = list(csv.DictReader(open(ROOT / "tests" / "golden" / "2025-04-28_usd.csv")))
 
-# Synthetic term sheet containing every golden value, in filing formats.
-TEXT = "\n".join(
-    f"{g['maturity'][:4]} Notes: ${int(g['principal']):,} | {g['coupon']}% per annum | "
-    f"{g['price']}% | Yield {g['yield']}% | T + {g['spread_bps']} bps | "
-    f"yield {g['benchmark_yield']}% | May 15, {g['maturity'][:4]} | "
-    f"{g['cusip'][:6]} {g['cusip'][6:]}"
-    for g in GOLDEN
-)
+def section(label: str, fmt) -> str:
+    """One term-sheet row: "Label: | 2030 Notes: v 2035 Notes: v ..."."""
+    return f"{label}: | " + "\n".join(f"{g['maturity'][:4]} Notes: {fmt(g)}" for g in GOLDEN)
+
+
+# Synthetic term sheet containing every golden value, in the filing's layout.
+TEXT = "\n".join([
+    section("Aggregate Principal Amount", lambda g: f"${int(g['principal']):,}"),
+    section("Maturity Date", lambda g: f"May 15, {g['maturity'][:4]}"),
+    section("Coupon (Interest Rate)", lambda g: f"{g['coupon']}% per annum"),
+    section("Public Offering Price", lambda g: f"{g['price']}%"),
+    section("Yield to Maturity", lambda g: f"{g['yield']}%"),
+    section("Spread to Benchmark Treasury", lambda g: f"T + {g['spread_bps']} bps"),
+    section("Benchmark Treasury Price and Yield", lambda g: f"99-01 / {g['benchmark_yield']}%"),
+    section("CUSIP/ISIN", lambda g: f"{g['cusip'][:6]} {g['cusip'][6:]}"),
+    "Trade Date: | April 28, 2025",
+])
 
 
 def tranche(g: dict) -> dict:
     return {
+        "series_label": f"{g['maturity'][:4]} Notes",
         "rate_type": "fixed",
         "principal": int(g["principal"]),
         "coupon_pct": float(g["coupon"]),
@@ -119,8 +129,11 @@ def test_currency_symbol_missing_warns():
 
 # --- Floating notes -------------------------------------------------------
 
-FRN_TEXT = ("2028 Floating Rate Notes: $750,000,000 | August 10, 2028 | Compounded SOFR, "
-            "reset quarterly, plus 0.52% per annum | 100.000%")
+FRN_TEXT = ("Aggregate Principal Amount: | 2028 Floating Rate Notes: $750,000,000\n"
+            "Maturity Date: | 2028 Floating Rate Notes: August 10, 2028\n"
+            "Coupon (Interest Rate): | 2028 Floating Rate Notes: Compounded SOFR, "
+            "reset quarterly, plus 0.52% per annum\n"
+            "Public Offering Price: | 2028 Floating Rate Notes: 100.000%")
 FRN = {"series_label": "2028 Floating Rate Notes", "rate_type": "floating",
        "principal": 750000000, "maturity_date": "2028-08-10", "issue_price_pct": 100.0,
        "floating_index": "SOFR", "floating_margin_bps": 52}
@@ -189,9 +202,14 @@ def test_shared_spread_both_consistent_is_fine():
 
 # --- Yield basis (GBP, February 2026 pattern) -----------------------------
 
-GBP_TEXT = ("2032 Notes: £1,250,000,000 | 4.625% | 99.791% | Yield to Maturity "
-            "(Semi-Annual / Annual): 4.612% / 4.665% | + 55 bps | 4.062% | November 13, 2032")
-GBP = {"rate_type": "fixed", "principal": 1250000000, "coupon_pct": 4.625,
+GBP_TEXT = ("Aggregate Principal Amount: | 2032 Notes: £1,250,000,000\n"
+            "Maturity Date: | 2032 Notes: November 13, 2032\n"
+            "Coupon (Interest Rate): | 2032 Notes: 4.625% per annum\n"
+            "Public Offering Price: | 2032 Notes: 99.791%\n"
+            "Yield to Maturity (Semi-Annual / Annual): | 2032 Notes: 4.612% / 4.665%\n"
+            "Spread to Benchmark Gilt: | 2032 Notes: + 55 bps\n"
+            "Benchmark Gilt Price and Yield: | 2032 Notes: 101.10 / 4.062%")
+GBP = {"series_label": "2032 Notes", "rate_type": "fixed", "principal": 1250000000, "coupon_pct": 4.625,
        "maturity_date": "2032-11-13", "issue_price_pct": 99.791, "issue_yield_pct": 4.612,
        "spread_bps": 55, "benchmark_yield_pct": 4.062}
 
@@ -208,3 +226,72 @@ def test_semi_annual_yield_checked_against_converted_annual():
 
 def test_semi_annual_yield_fails_without_basis():
     assert check_gbp().status == tc.FAIL
+
+
+
+# --- Series-tied grounding (August 2026 2046 maturity) ----------------------
+
+AUG_SERIES_TEXT = (
+    "Aggregate Principal Amount: | 2036 Notes: $4,500,000,000 2046 Notes: $3,000,000,000\n"
+    "Maturity Date: | 2036 Notes: August 15, 2036 2046 Notes: August 15,\n2046\n"
+    "Coupon (Interest Rate): | 2036 Notes: 5.450% per annum 2046 Notes: 6.250% per annum\n"
+    "Public Offering Price: | 2036 Notes: 99.466% 2046 Notes: 99.626%\n"
+    "Benchmark Treasury: | 2036 Notes: 4.375% due May 15, 2036 2046 Notes: 5.000% due May 15, 2046\n"
+)
+AUG_2046 = {"series_label": "2046 Notes", "rate_type": "fixed", "principal": 3000000000,
+            "coupon_pct": 6.25, "maturity_date": "2046-08-15", "issue_price_pct": 99.626}
+
+
+def check_aug(t, text=AUG_SERIES_TEXT):
+    return tc.check_tranche(t, text, currency="USD", settlement_date="2026-08-10", freq=2)
+
+
+def test_series_tied_values_pass():
+    r = check_aug(AUG_2046)
+    assert not [i for i in r.issues if i.field in ("maturity_date", "principal", "coupon_pct")], r.issues
+
+
+def test_benchmark_date_as_maturity_fails():
+    # The model gave the 2046 Notes their benchmark Treasury's maturity. The date
+    # is in the filing (Benchmark Treasury row), so plain grounding passes it.
+    r = check_aug({**AUG_2046, "maturity_date": "2046-05-15"})
+    assert r.evidence["maturity_date"] is not None           # plain grounding found it
+    assert r.status == tc.FAIL
+    assert any(i.field == "maturity_date" and i.level == tc.FAIL for i in r.issues)
+
+
+def test_other_series_principal_fails():
+    r = check_aug({**AUG_2046, "principal": 4500000000})
+    assert any(i.field == "principal" and i.level == tc.FAIL for i in r.issues)
+
+
+def test_missing_series_label_warns():
+    r = check_aug({**AUG_2046, "series_label": "2099 Notes"})
+    assert r.status == tc.WARN
+    assert any(i.field == "maturity_date" and "not found" in i.message for i in r.issues)
+
+
+def test_missing_section_warns():
+    r = check_aug(AUG_2046, AUG_SERIES_TEXT.replace("Maturity Date:", "Final Date:"))
+    assert any(i.field == "maturity_date" and i.level == tc.WARN for i in r.issues)
+
+
+def test_unlabeled_section_keyed_by_heading():
+    # November 2025 layout: the FRN has its own block under a "Notes due" heading.
+    text = ("Floating Rate Notes due 2028\nAggregate Principal Amount: | $500,000,000\n"
+            "Maturity Date: | November 15, 2028\nCoupon (Interest Rate): | Compounded SOFR plus 0.52%")
+    frn = {"series_label": "Floating Rate Notes due 2028", "rate_type": "floating",
+           "principal": 500000000, "maturity_date": "2028-11-15", "floating_index": "SOFR"}
+    r = tc.check_tranche(frn, text, currency="USD", settlement_date="2025-11-06", freq=4)
+    assert not [i for i in r.issues if i.field in ("maturity_date", "principal")], r.issues
+
+
+def test_no_yield_solves_price():
+    assert tc.yield_from_price(0.99901, 0.45, "2020-08-05", "2025-08-15") is None
+    r = tc.check_tranche({"rate_type": "fixed", "principal": 1, "coupon_pct": 0.45,
+                          "maturity_date": "2025-08-15", "issue_price_pct": 0.99901,
+                          "issue_yield_pct": 0.47}, "", currency="USD",
+                         settlement_date="2020-08-05", freq=2)
+    msgs = [i.message for i in r.issues if i.field == "issue_yield_pct"]
+    assert any("no yield solves this price" in m for m in msgs)
+    assert not any("50.000" in m for m in msgs)

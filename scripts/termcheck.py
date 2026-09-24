@@ -9,6 +9,8 @@ source text where its value was found (the evidence).
 
 Checks:
   - grounding: every number, date, and identifier must appear in the source text
+  - series-tied grounding: maturity, principal, and coupon must appear under the
+    tranche's own series label in their labeled section
   - CUSIP and ISIN check digits, and ISIN must embed the CUSIP for US ISINs
   - yield recomputed from price, coupon, and dates must match the stated yield
   - spread must equal issue yield minus benchmark yield
@@ -163,10 +165,18 @@ def price_from_yield(yield_pct: float, coupon_pct: float, settle, maturity,
     return pv
 
 
+YIELD_LO, YIELD_HI = -5.0, 50.0
+
+
 def yield_from_price(price_pct: float, coupon_pct: float, settle, maturity,
-                     freq: int = 2, day_count: str = "30/360") -> float:
-    """Yield to maturity in percent, by bisection."""
-    lo, hi = -5.0, 50.0
+                     freq: int = 2, day_count: str = "30/360") -> float | None:
+    """Yield to maturity in percent, by bisection. None if no yield in
+    [YIELD_LO, YIELD_HI] reproduces the price."""
+    lo, hi = YIELD_LO, YIELD_HI
+    p_lo = price_from_yield(lo, coupon_pct, settle, maturity, freq, day_count)
+    p_hi = price_from_yield(hi, coupon_pct, settle, maturity, freq, day_count)
+    if not (p_hi <= price_pct <= p_lo):
+        return None
     for _ in range(200):
         mid = (lo + hi) / 2
         if price_from_yield(mid, coupon_pct, settle, maturity, freq, day_count) > price_pct:
@@ -250,6 +260,100 @@ def find_percent_as_bps(text: str, bps) -> str | None:
         if n == target and text[m.end():].lstrip().startswith("%"):
             return _snippet(text, m.start(), m.end())
     return None
+
+
+# Series-tied grounding ------------------------------------------------------
+
+SECTIONS = {
+    "maturity_date": r"Maturity Date",
+    "principal": r"Aggregate Principal Amount",
+    "coupon_pct": r"Coupon(?: \(Interest Rate\))?|Interest Rate",
+}
+# A row label: capitalized words, no digits or commas ("Coupon (Interest Rate): |").
+_ROW_LABEL = re.compile(r"(?:^|(?<=\s))[A-Z][A-Za-z ()/&'’*\-]{0,80}:\s*\|")
+_SERIES = re.compile(r"(\d{4})\s+(Floating\s+Rate\s+)?Notes\s*:", re.IGNORECASE)
+_HEADING = re.compile(r"(Floating\s+Rate\s+)?Notes\s+due\s+(\d{4})", re.IGNORECASE)
+_DATE_RE = re.compile(r"[A-Z][a-z]+\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+[A-Z][a-z]+\s+\d{4}")
+
+
+def series_key(label: str | None) -> tuple[str, bool] | None:
+    """("2046", False) for "2046 Notes"; ("2028", True) for "2028 Floating Rate
+    Notes" or "Floating Rate Notes due 2028". None if no year."""
+    if not label:
+        return None
+    m = re.search(r"\d{4}", label)
+    return (m.group(0), "floating" in label.lower()) if m else None
+
+
+def section_entries(text: str, field: str) -> dict[tuple[str, bool], str] | None:
+    """{series key: entry text} for every labeled section of `field` in the
+    (normalized) text. An unlabeled section takes its key from the nearest
+    preceding "... Notes due YYYY" heading. None if the section is absent."""
+    found = False
+    entries: dict[tuple[str, bool], str] = {}
+    for m in re.finditer(rf"(?:^|(?<=\s))(?:{SECTIONS[field]})\s*:\s*\|", text):
+        found = True
+        nxt = _ROW_LABEL.search(text, m.end())
+        body = text[m.end():nxt.start() if nxt else len(text)]
+        parts = list(_SERIES.finditer(body))
+        if parts:
+            for i, p in enumerate(parts):
+                end = parts[i + 1].start() if i + 1 < len(parts) else len(body)
+                entries.setdefault((p.group(1), bool(p.group(2))), body[p.end():end].strip())
+        else:
+            heads = list(_HEADING.finditer(text, max(0, m.start() - 400), m.start()))
+            if heads:
+                h = heads[-1]
+                entries.setdefault((h.group(2), bool(h.group(1))), body.strip())
+    return entries if found else None
+
+
+def _entry_matches(field: str, entry: str, value) -> bool:
+    if field == "maturity_date":
+        want = _to_date(value)
+        for d in _DATE_RE.findall(entry):
+            try:
+                return date.fromisoformat(pd_date(d)) == want
+            except ValueError:
+                continue
+        return False
+    m = _NUM_RE.search(entry)
+    if not m:
+        return False
+    n = Decimal(m.group(1).replace(",", "") + (m.group(2) or ""))
+    n *= {"million": 1_000_000, "billion": 1_000_000_000}.get((m.group(3) or "").strip().lower(), 1)
+    return n == Decimal(str(value))
+
+
+def pd_date(s: str) -> str:
+    from datetime import datetime
+    s = re.sub(r"\s+", " ", s.replace(",", ""))
+    for fmt in ("%B %d %Y", "%d %B %Y"):
+        try:
+            return datetime.strptime(s, fmt).date().isoformat()
+        except ValueError:
+            continue
+    raise ValueError(s)
+
+
+def check_series_fields(t: dict, text: str, r: "CheckResult") -> None:
+    key = series_key(t.get("series_label"))
+    for field in SECTIONS:
+        value = t.get(field)
+        if value is None:
+            continue
+        entries = section_entries(text, field)
+        name = SECTIONS[field].split("(")[0].split("|")[0].strip()
+        if entries is None:
+            r.add(WARN, field, f'"{name}:" section not found; value not tied to its series')
+            continue
+        if key is None or key not in entries:
+            r.add(WARN, field, f'series label {t.get("series_label")!r} not found under "{name}:"')
+            continue
+        entry = entries[key]
+        r.evidence[f"{field}_series"] = entry[:120]
+        if not _entry_matches(field, entry, value):
+            r.add(FAIL, field, f'{value} differs from "{name}:" for {t.get("series_label")}: {entry[:80]!r}')
 
 
 def find_date(text: str, value) -> str | None:
@@ -358,6 +462,9 @@ def check_tranche(tranche: dict, text: str, *, currency: str, settlement_date,
         elif found != currency:
             r.add(FAIL, "currency", f"extracted {currency} but principal is shown in {found}")
 
+    # Series-tied grounding: value must sit under its own series label
+    check_series_fields(t, text, r)
+
     # Identifiers
     if t.get("cusip") and not valid_cusip(t["cusip"]):
         r.add(FAIL, "cusip", f"bad check digit: {t['cusip']}")
@@ -390,6 +497,11 @@ def check_tranche(tranche: dict, text: str, *, currency: str, settlement_date,
     # Yield from price
     if not floating and None not in (price, cpn, settle, mat) and mat > settle:
         calc = yield_from_price(price, cpn, settle, mat, freq, day_count)
+    else:
+        calc = None
+    if calc is None and not floating and None not in (price, cpn, settle, mat) and mat > settle:
+        r.add(FAIL, "issue_yield_pct", f"no yield solves this price ({price})")
+    elif calc is not None:
         if yield_basis == "semi-annual" and freq != 2:
             r.evidence["yield_from_price_coupon_basis"] = f"{calc:.4f}"
             calc = 2 * ((1 + calc / 100 / freq) ** (freq / 2) - 1) * 100
