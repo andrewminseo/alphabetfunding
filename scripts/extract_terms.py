@@ -43,6 +43,7 @@ PENDING = DATA / "tranches_pending.csv"
 AUDIT = DATA / "extraction_audit.jsonl"
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
+DEFAULT_MODEL = "qwen2.5:14b"
 FOOTER = "has filed a registration statement"
 
 BASE_COLS = [
@@ -102,6 +103,7 @@ Rules:
 - Percentages as plain numbers (4.000% -> 4.0). Basis points as plain numbers ("T + 32 bps" -> 32). Dates as YYYY-MM-DD. Principal and net proceeds in full currency units ($750,000,000 -> 750000000).
 - spread_bps is the issue spread to the benchmark at pricing (e.g. "Spread to Benchmark Treasury"). Make-whole or redemption spreads ("Treasury Rate plus X basis points", "Bund Rate plus X basis points") are NOT the issue spread; never use them for spread_bps.
 - benchmark_yield_pct is the benchmark security's yield at pricing, not its coupon.
+- When a filing gives more than one spread for a note, report the spread measured against the benchmark security whose yield you report in benchmark_yield_pct.
 - CUSIP is 9 characters with no spaces.
 - Floating rate notes: the margin over the floating index (e.g. SOFR plus a percentage) goes in floating_margin_bps, converted to basis points (a margin of 0.25% is 25). A margin over SOFR is not a spread to a benchmark: for floating notes, spread_bps and coupon_pct are null.
 """
@@ -425,7 +427,8 @@ def main() -> None:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--url", action="append", default=[])
     p.add_argument("--index", action="store_true", help="process FWPs in data/filings_index.csv")
-    p.add_argument("--model", default="qwen2.5:7b")
+    p.add_argument("--model", default=DEFAULT_MODEL,
+                   help=f"Ollama model (default {DEFAULT_MODEL}; needs ~10 GB free memory)")
     p.add_argument("--freq", type=int, help="coupon frequency override (default 2 USD, 1 otherwise)")
     p.add_argument("--golden", type=Path, help="golden CSV to compare against; exits 1 on mismatch. "
                    "Writes nothing to the pending or audit files.")

@@ -27,11 +27,12 @@ INDEX = DATA / "filings_index.csv"
 PENDING = DATA / "tranches_pending.csv"
 
 sys.path.insert(0, str(SCRIPTS))
+from extract_terms import DEFAULT_MODEL  # noqa: E402
 from reconcile import load_and_reconcile, print_report  # noqa: E402
 
 STEPS = [
     ["edgar_pull.py"],
-    ["extract_terms.py", "--index"],
+    ["extract_terms.py", "--index", "--model", DEFAULT_MODEL],
     ["update_fx.py"],
     ["update_yields.py"],
     ["treasury.py"],

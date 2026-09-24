@@ -14,7 +14,7 @@ export SEC_USER_AGENT="Your Name you@umich.edu"   # SEC requires name + email
 **1. Run the pipeline**
 
 ```bash
-ollama serve                          # local model for extraction (ollama pull qwen2.5:7b)
+ollama serve                          # local model for extraction (ollama pull qwen2.5:14b)
 python scripts/run_pipeline.py
 ```
 
@@ -28,6 +28,8 @@ It runs these steps in order and stops at the first error:
 | `update_yields.py` | Writes the latest U.S. Treasury par yield curve to `data/treasury_curve.csv` |
 | `treasury.py` | Summary, maturity ladder, refinancing sensitivity -> `output/` |
 | reconciliation | Live tranche face value in USD vs. latest reported `LongTermDebt` |
+
+Extraction uses `qwen2.5:14b` by default, which needs about 10 GB of free memory. On smaller machines, run `python scripts/extract_terms.py --index --model qwen2.5:7b` instead: it works, but makes more mistakes, so expect more WARN and FAIL rows to review.
 
 It ends with a summary: new filings, new pending rows by status, rows needing your review, and the reconciliation gap. It never promotes anything.
 
