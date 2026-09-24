@@ -25,14 +25,44 @@ REQUIRED = [
     "tranche_id",
     "currency",
     "principal_local",
-    "coupon_pct",
     "issue_date",
     "maturity_date",
     "rate_type",
 ]
+# coupon_pct is required for fixed notes only; floating notes have no fixed coupon.
 
 
-def load(tranche_file: Path, as_of: pd.Timestamp) -> pd.DataFrame:
+def read_market_yields(path: Path | None = None) -> pd.DataFrame:
+    """market_yields.csv: one row per rate. rate_type "refi" is the assumed
+    refinancing yield for a currency; rate_type "index" is a floating index
+    level (index_name, e.g. SOFR). The value is in refi_yield_pct for both."""
+    y = pd.read_csv(path or DATA / "market_yields.csv")
+    y["currency"] = y["currency"].str.upper().str.strip()
+    y["rate_type"] = y["rate_type"].str.lower().str.strip()
+    y["index_name"] = y["index_name"].fillna("").astype(str).str.strip()
+    return y
+
+
+def refi_yields(y: pd.DataFrame) -> pd.Series:
+    refi = y[y["rate_type"] == "refi"]
+    if refi["currency"].duplicated().any():
+        sys.exit("market_yields.csv: more than one refi row for a currency")
+    return refi.set_index("currency")["refi_yield_pct"].dropna()
+
+
+def index_rate(y: pd.DataFrame, tranche: pd.Series) -> float | None:
+    """The index row for a floating note: same currency, and index_name named in
+    the tranche's floating_index (if present) or benchmark text. Never a refi row."""
+    rows = y[(y["rate_type"] == "index") & (y["currency"] == tranche["currency"])]
+    names = " ".join(str(tranche.get(c, "") or "") for c in ("floating_index", "benchmark")).lower()
+    hits = rows[[bool(n) and n.lower() in names for n in rows["index_name"]]]
+    if len(hits) != 1 or pd.isna(hits["refi_yield_pct"].iloc[0]):
+        return None
+    return float(hits["refi_yield_pct"].iloc[0])
+
+
+def load(tranche_file: Path, as_of: pd.Timestamp,
+         fx: pd.Series | None = None, yields: pd.DataFrame | None = None) -> pd.DataFrame:
     t = pd.read_csv(tranche_file)
 
     if t.empty:
@@ -45,6 +75,10 @@ def load(tranche_file: Path, as_of: pd.Timestamp) -> pd.DataFrame:
     t["issue_date"] = pd.to_datetime(t["issue_date"])
     t["maturity_date"] = pd.to_datetime(t["maturity_date"])
     t["currency"] = t["currency"].str.upper().str.strip()
+    t["rate_type"] = t["rate_type"].str.lower().str.strip()
+    if "coupon_pct" not in t.columns:
+        t["coupon_pct"] = float("nan")
+    floating = t["rate_type"] == "floating"
 
     problems = []
 
@@ -57,11 +91,16 @@ def load(tranche_file: Path, as_of: pd.Timestamp) -> pd.DataFrame:
     if t[REQUIRED].isna().any().any():
         problems.append("blank required fields")
 
+    if t.loc[~floating, "coupon_pct"].isna().any():
+        problems.append("blank coupon_pct on a fixed-rate note")
+
     if problems:
         sys.exit("Data problems:\n" + "\n".join(problems))
 
-    fx = pd.read_csv(DATA / "fx_rates.csv").set_index("currency")["usd_per_unit"]
-    yields = pd.read_csv(DATA / "market_yields.csv").set_index("currency")["refi_yield_pct"]
+    if fx is None:
+        fx = pd.read_csv(DATA / "fx_rates.csv").set_index("currency")["usd_per_unit"]
+    if yields is None:
+        yields = read_market_yields()
 
     missing_fx = sorted(set(t["currency"]) - set(fx.index))
     if missing_fx:
@@ -72,31 +111,57 @@ def load(tranche_file: Path, as_of: pd.Timestamp) -> pd.DataFrame:
         (t["maturity_date"] > as_of)
     ].copy()
 
+    if live.empty:
+        sys.exit(f"No outstanding tranches as of {as_of:%Y-%m-%d} in {tranche_file.name}.")
+
     live["principal_usd"] = live["principal_local"] * live["currency"].map(fx)
     live["years_to_maturity"] = (
         (live["maturity_date"] - as_of).dt.days / 365.25
     )
+
+    # Current cost: fixed coupon, or index + margin for floating notes.
+    # Floating notes without an index row or margin stay NaN and are excluded.
+    margin = live["floating_margin_bps"] if "floating_margin_bps" in live.columns else pd.Series(float("nan"), index=live.index)
+    live["cost_pct"] = live["coupon_pct"].where(live["rate_type"] != "floating")
+    for i, r in live[live["rate_type"] == "floating"].iterrows():
+        rate = index_rate(yields, r)
+        if rate is not None and pd.notna(margin[i]):
+            live.at[i, "cost_pct"] = rate + float(margin[i]) / 100
+    live["costed"] = live["cost_pct"].notna()
+
     live["annual_coupon_usd"] = (
-        live["principal_usd"] * live["coupon_pct"] / 100
+        live["principal_usd"] * live["cost_pct"] / 100
     )
-    live["refi_yield_pct"] = live["currency"].map(yields)
+    live["refi_yield_pct"] = live["currency"].map(refi_yields(yields))
 
     return live
 
 
+def uncosted_frn_usd(d: pd.DataFrame) -> float:
+    return float(d.loc[~d["costed"], "principal_usd"].sum())
+
+
+def refi_unavailable(d: pd.DataFrame) -> list[str]:
+    return sorted(d.loc[d["refi_yield_pct"].isna(), "currency"].unique())
+
+
 def summary(d: pd.DataFrame) -> dict:
     total = d["principal_usd"].sum()
+    c = d[d["costed"]]
+    costed_total = c["principal_usd"].sum()
 
     return {
         "outstanding_usd": total,
         "n_tranches": len(d),
         "wa_coupon_pct": (
-            d["coupon_pct"] * d["principal_usd"]
-        ).sum() / total,
+            (c["cost_pct"] * c["principal_usd"]).sum() / costed_total
+            if costed_total else float("nan")
+        ),
         "wa_maturity_yrs": (
             d["years_to_maturity"] * d["principal_usd"]
         ).sum() / total,
-        "annual_coupon_usd": d["annual_coupon_usd"].sum(),
+        "annual_coupon_usd": c["annual_coupon_usd"].sum(),
+        "uncosted_frn_usd": uncosted_frn_usd(d),
         "currency_mix": (
             d.groupby("currency")["principal_usd"].sum() / total
         ).sort_values(ascending=False),
@@ -133,7 +198,12 @@ def refi_sensitivity(
 ) -> pd.DataFrame:
 
     cutoff = as_of + pd.DateOffset(years=horizon)
-    due = d[d["maturity_date"] <= cutoff]
+    # Only notes with both a current cost and a refi yield for their currency.
+    due = d[
+        (d["maturity_date"] <= cutoff)
+        & d["costed"]
+        & d["refi_yield_pct"].notna()
+    ]
 
     rows = []
 
@@ -142,7 +212,7 @@ def refi_sensitivity(
 
         delta = (
             due["principal_usd"]
-            * (new_rate - due["coupon_pct"])
+            * (new_rate - due["cost_pct"])
             / 100
         ).sum()
 
@@ -233,16 +303,24 @@ def main() -> None:
 
     print(f"{'Debt tracked':<28}{fmt_b(stats['outstanding_usd']):>12}")
     print(f"{'Tranches':<28}{stats['n_tranches']:>12}")
-    print(f"{'Weighted avg coupon':<28}{stats['wa_coupon_pct']:>11.2f}%")
+    if pd.notna(stats["wa_coupon_pct"]):
+        print(f"{'Weighted avg coupon':<28}{stats['wa_coupon_pct']:>11.2f}%")
+    else:
+        print(f"{'Weighted avg coupon':<28}{'n/a':>12}")
     print(f"{'Weighted avg maturity':<28}{stats['wa_maturity_yrs']:>9.1f} yrs")
     print(f"{'Annual coupon cost':<28}{fmt_b(stats['annual_coupon_usd']):>12}")
     print(f"{'Maturing next 5 yrs':<28}{fmt_b(due_5y):>12}")
+    if stats["uncosted_frn_usd"]:
+        print(f"\nFloating-rate notes excluded from coupon cost and avg coupon "
+              f"(no index rate or margin): {fmt_b(stats['uncosted_frn_usd'])}")
 
     print("\nCurrency mix")
     for currency, weight in stats["currency_mix"].items():
         print(f"  {currency:<26}{weight:>11.1%}")
 
     print(f"\nRefinancing sensitivity ({args.horizon}Y)")
+    for ccy in refi_unavailable(debt):
+        print(f"  refi analysis unavailable for {ccy}: no market yield")
     for _, row in refi.iterrows():
         print(
             f"  {int(row['shock_bps']):+5d} bps"

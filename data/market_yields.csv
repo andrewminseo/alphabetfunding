@@ -1,2 +1,2 @@
-currency,refi_yield_pct,as_of,source
-USD,5.05,2026-09-10,Atlantis Data Solutions - Alphabet 4.000% Notes due 2030 CUSIP 02079KAK3
+currency,refi_yield_pct,as_of,source,rate_type,index_name
+USD,5.05,2026-09-10,Atlantis Data Solutions - Alphabet 4.000% Notes due 2030 CUSIP 02079KAK3,refi,
