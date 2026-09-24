@@ -233,20 +233,26 @@ def plot_ladder(
 
     currencies = [c for c in ladder.columns if c != "TOTAL"]
 
+    # Plot only years with maturities; the ladder itself keeps every year.
+    # Bars are evenly spaced, so gaps between years are not to scale.
+    due = ladder[ladder["TOTAL"] > 0]
+
     ax = (
-        ladder[currencies] / 1e9
+        due[currencies] / 1e9
     ).plot(
         kind="bar",
         stacked=True,
-        figsize=(11, 5),
+        figsize=(max(11, 0.45 * len(due)), 5.5),
         width=0.8,
     )
 
     ax.set(
         title=title,
-        xlabel="Maturity year",
+        xlabel="Maturity year (years with maturities only)",
         ylabel="Principal due (USD billions)",
     )
+    ax.tick_params(axis="x", labelrotation=45, labelsize=9)
+    plt.setp(ax.get_xticklabels(), ha="right", rotation_mode="anchor")
 
     ax.legend(title="Currency", frameon=False)
     ax.spines[["top", "right"]].set_visible(False)
