@@ -193,7 +193,6 @@ def fmt_b(value: float) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--sample", action="store_true")
     parser.add_argument(
         "--as-of",
         default=pd.Timestamp.today().strftime("%Y-%m-%d"),
@@ -209,9 +208,7 @@ def main() -> None:
     args = parser.parse_args()
 
     as_of = pd.Timestamp(args.as_of)
-    source = DATA / (
-        "sample_tranches.csv" if args.sample else "tranches.csv"
-    )
+    source = DATA / "tranches.csv"
 
     debt = load(source, as_of)
 

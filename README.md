@@ -11,21 +11,39 @@ export SEC_USER_AGENT="Your Name you@umich.edu"   # SEC requires name + email
 
 ## Workflow
 
-**1. Pull the filings index and XBRL debt totals**
+**1. Run the pipeline**
 
 ```bash
-python scripts/edgar_pull.py --since 2020-01-01
+ollama serve                          # local model for extraction (ollama pull qwen2.5:7b)
+python scripts/run_pipeline.py
 ```
 
-This writes `data/filings_index.csv` (every 10-K, 10-Q, 8-K, and 424B2 with links) and `data/xbrl_debt_facts.csv` (reported debt totals, maturities by year, interest expense). To download the documents themselves:
+It runs these steps in order and stops at the first error:
+
+| Step | What it does |
+|---|---|
+| `edgar_pull.py` | Refreshes `data/filings_index.csv` (10-K, 10-Q, 8-K, 424B2, FWP) and `data/xbrl_debt_facts.csv` |
+| `extract_terms.py --index` | Extracts tranches from new FWP pricing term sheets into `data/tranches_pending.csv`; FWPs already in `data/extraction_audit.jsonl` are skipped (`--force` to redo) |
+| `update_fx.py` | Refreshes `data/fx_rates.csv` |
+| `update_yields.py` | Writes the latest U.S. Treasury par yield curve to `data/treasury_curve.csv` |
+| `treasury.py` | Summary, maturity ladder, refinancing sensitivity -> `output/` |
+| reconciliation | Live tranche face value in USD vs. latest reported `LongTermDebt` |
+
+It ends with a summary: new filings, new pending rows by status, rows needing your review, and the reconciliation gap. It never promotes anything.
+
+**2. Review pending rows.** Open `data/tranches_pending.csv`. Each row has a `status` (PASS / WARN / FAIL) and `issues`; the evidence snippets and raw model output are in `data/extraction_audit.jsonl`. Check each row against the filing and set `approved` to `yes` on the ones you've verified.
+
+The model only does data entry. Every tranche is checked by `scripts/termcheck.py`: every number must appear in the filing, CUSIP/ISIN check digits must be valid, the yield recomputed from the price must match, spread must equal yield minus benchmark yield, net proceeds must add up, and the currency must match the symbol on the principal amount. Non-debt FWPs (equity offerings) are skipped before the model sees them.
+
+**3. Promote and re-run the analytics**
 
 ```bash
-python scripts/edgar_pull.py --since 2025-01-01 --forms 424B2 8-K --download
+python scripts/promote.py             # approved, non-FAIL rows -> tranches.csv
+python scripts/treasury.py
+python scripts/reconcile.py
 ```
 
-**2. Build the tranche database by hand**
-
-Fill `data/tranches.csv`, one row per note. Where to find terms:
+**Adding tranches by hand.** Notes without an FWP pricing term sheet go into `data/tranches.csv` directly. Fill in `source_filing` and `source_url` for every row; if a number can't be traced to a document, it doesn't go in.
 
 | Source | What it gives you |
 |---|---|
@@ -34,44 +52,24 @@ Fill `data/tranches.csv`, one row per note. Where to find terms:
 | 10-K / 10-Q debt footnote | Outstanding notes by currency, coupon ranges, total carrying value |
 | Bloomberg (Ross terminals) | Tranche-level data for non-USD deals, yields and spreads at issue |
 
-Fill in `source_filing` and `source_url` for every row. If a number can't be traced to a document, it doesn't go in.
+**Reconciliation.** The tranche total should land close to reported `LongTermDebt`. Differences come from FX, discounts and issuance costs, notes issued after the XBRL period end (reported separately), and any notes you've missed. Chase down anything large.
 
-**3. Reconcile.** Your tranche total (converted to USD) should land close to reported `LongTermDebt` in `xbrl_debt_facts.csv`. Differences come from FX, discounts and issuance costs, and any notes you've missed. Chase down anything large.
-
-**4. Update market inputs.** Replace the PLACEHOLDER values in `data/fx_rates.csv` and `data/market_yields.csv`. `refi_yield_pct` is your estimate of where Alphabet could issue today in that currency (benchmark yield plus spread).
-
-**5. Run the analytics**
+**Checks.** Offline tests: `pytest`. Extraction regression against hand-verified values (writes nothing to the pending or audit files):
 
 ```bash
-python scripts/treasury.py --as-of 2026-09-18
-python scripts/treasury.py --sample          # test run on fake data
+python scripts/extract_terms.py --url https://www.sec.gov/Archives/edgar/data/1652044/000119312525100802/d806252dfwp.htm --golden tests/golden/2025-04-28_usd.csv
 ```
-
-This prints the summary and writes `output/maturity_ladder.png`, `maturity_ladder.csv`, and `refi_sensitivity.csv`.
-
-## LLM extraction
-
-Pricing term sheets (FWP filings) can be turned into candidate tranche rows by a local model through [Ollama](https://ollama.com) (`ollama pull qwen2.5:7b`). The model only does data entry. Every tranche is checked by `scripts/termcheck.py`: every number must appear in the filing, CUSIP/ISIN check digits must be valid, the yield recomputed from the price must match, spread must equal yield minus benchmark yield, and net proceeds must add up. Results land in a pending file for you to review; nothing reaches `tranches.csv` until you approve it.
-
-```bash
-python scripts/edgar_pull.py --since 2025-01-01          # index now includes FWP
-python scripts/extract_terms.py --index                  # or --url <FWP url>
-# review data/tranches_pending.csv (status, issues, and evidence in
-# data/extraction_audit.jsonl); set approved = yes on rows you've checked
-python scripts/promote.py                                # approved, non-FAIL rows -> tranches.csv
-python scripts/treasury.py
-```
-
-Regression check against hand-verified values: `python scripts/extract_terms.py --url https://www.sec.gov/Archives/edgar/data/1652044/000119312525100802/d806252dfwp.htm --golden tests/golden/2025-04-28_usd.csv`. Offline checks: `pytest`.
 
 ## Data files
 
 | File | Contents |
 |---|---|
-| `data/tranches.csv` | Your real database. Starts empty. |
-| `data/sample_tranches.csv` | Illustrative fake data for testing. Never cite it. |
+| `data/tranches.csv` | Your real database. |
 | `data/fx_rates.csv` | USD per unit of each currency |
-| `data/market_yields.csv` | Assumed refinancing yield by currency |
+| `data/market_yields.csv` | Your refinancing yield estimate by currency (used by `treasury.py`) |
+| `data/treasury_curve.csv` | Latest U.S. Treasury par yield curve, one row per tenor |
+| `data/tranches_pending.csv` | Extracted tranches awaiting your review |
+| `data/extraction_audit.jsonl` | Raw model output, issues, and evidence per processed FWP |
 
 ## Model limitations
 

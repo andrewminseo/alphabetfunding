@@ -14,6 +14,8 @@ Checks:
   - spread must equal issue yield minus benchmark yield
   - net proceeds must equal principal x (price - underwriting discount)
   - currency must match the symbol or code right before the principal amount
+  - floating notes: coupon and spread must be null; margin may be written as a percent
+  - a spread matching another tranche's yield minus benchmark (check_deal)
   - required fields present, maturity after settlement, values in sane ranges
 
 Yield convention: dated date = settlement date (new issue, no accrued interest),
@@ -235,6 +237,21 @@ def currency_before_number(text: str, value) -> tuple[str | None, str | None]:
     return None, None
 
 
+def find_percent_as_bps(text: str, bps) -> str | None:
+    """Snippet where `bps` basis points is written as a percent ("0.52%" for 52)."""
+    try:
+        target = Decimal(str(bps)) / 100
+    except InvalidOperation:
+        return None
+    for m in _NUM_RE.finditer(text):
+        if m.group(3):
+            continue
+        n = Decimal(m.group(1).replace(",", "") + (m.group(2) or ""))
+        if n == target and text[m.end():].lstrip().startswith("%"):
+            return _snippet(text, m.start(), m.end())
+    return None
+
+
 def find_date(text: str, value) -> str | None:
     d = _to_date(value)
     month = d.strftime("%B")
@@ -267,7 +284,8 @@ def _num(x):
 
 
 def check_tranche(tranche: dict, text: str, *, currency: str, settlement_date,
-                  freq: int, day_count: str | None = None) -> CheckResult:
+                  freq: int, day_count: str | None = None,
+                  yield_basis: str | None = None) -> CheckResult:
     """Check one extracted tranche against its source text.
 
     tranche: dict with the extractor's per-tranche fields (principal, coupon_pct,
@@ -275,6 +293,10 @@ def check_tranche(tranche: dict, text: str, *, currency: str, settlement_date,
       issue_yield_pct, spread_bps, benchmark_yield_pct, floating_index,
       floating_margin_bps, cusip, isin, rate_type). Missing keys count as null.
     text: the filing text the values were extracted from.
+    yield_basis: "semi-annual" when the filing labels the stated yield as
+      semi-annual (e.g. "Yield to Maturity (Semi-Annual / Annual)"); the yield
+      from price is then converted to semi-annual before comparing. None means
+      the stated yield compounds at the coupon frequency.
     """
     r = CheckResult()
     t = {k: tranche.get(k) for k in set(tranche) | set(NUMERIC_FIELDS + DATE_FIELDS + ID_FIELDS)}
@@ -293,12 +315,18 @@ def check_tranche(tranche: dict, text: str, *, currency: str, settlement_date,
             r.add(FAIL, f, "missing")
     if floating and not t.get("floating_index"):
         r.add(FAIL, "floating_index", "floating note without an index")
+    if floating and t.get("coupon_pct") is not None:
+        r.add(FAIL, "coupon_pct", "must be null for a floating note")
+    if floating and t.get("spread_bps") is not None:
+        r.add(FAIL, "spread_bps", "must be null for a floating note (margin goes in floating_margin_bps)")
 
     # Grounding
     for f in NUMERIC_FIELDS:
         if t.get(f) is None:
             continue
         ev = find_number(text, t[f])
+        if ev is None and f == "floating_margin_bps":
+            ev = find_percent_as_bps(text, t[f])
         r.evidence[f] = ev
         if ev is None:
             r.add(FAIL, f, f"value {t[f]} not found in filing text")
@@ -362,6 +390,10 @@ def check_tranche(tranche: dict, text: str, *, currency: str, settlement_date,
     # Yield from price
     if not floating and None not in (price, cpn, settle, mat) and mat > settle:
         calc = yield_from_price(price, cpn, settle, mat, freq, day_count)
+        if yield_basis == "semi-annual" and freq != 2:
+            r.evidence["yield_from_price_coupon_basis"] = f"{calc:.4f}"
+            calc = 2 * ((1 + calc / 100 / freq) ** (freq / 2) - 1) * 100
+        r.evidence["yield_basis"] = yield_basis or f"coupon frequency ({freq}/yr)"
         r.evidence["yield_from_price"] = f"{calc:.4f}"
         if yld is None:
             r.add(WARN, "issue_yield_pct", f"no stated yield; price implies {calc:.3f}")
@@ -386,6 +418,10 @@ def check_tranche(tranche: dict, text: str, *, currency: str, settlement_date,
             r.add(WARN, "spread_bps", f"stated {spread:g} bp vs yield - benchmark = {implied:.1f} bp")
     elif spread is not None and not floating:
         r.add(WARN, "spread_bps", "spread not verifiable (missing yield or benchmark yield)")
+    elif spread is None and not floating and None not in (bmk, yld):
+        implied = (yld - bmk) * 100
+        r.evidence["spread_from_yields"] = f"{implied:.1f}"
+        r.add(WARN, "spread_bps", f"spread missing; yield minus benchmark = {implied:.1f} bp")
 
     # Net proceeds
     prin, disc, net = _num(t.get("principal")), _num(t.get("underwriting_discount_pct")), _num(t.get("net_proceeds"))
@@ -396,3 +432,34 @@ def check_tranche(tranche: dict, text: str, *, currency: str, settlement_date,
             r.add(FAIL, "net_proceeds", f"stated {net:,.0f} vs principal x (price - discount) = {calc:,.0f}")
 
     return r
+
+
+def _implied_spread(t: dict) -> float | None:
+    y, b = _num(t.get("issue_yield_pct")), _num(t.get("benchmark_yield_pct"))
+    return None if None in (y, b) else (y - b) * 100
+
+
+def check_deal(tranches: list[dict], results: list[CheckResult]) -> None:
+    """Cross-tranche checks; adds issues to `results` in place.
+
+    A tranche whose spread matches another tranche's yield minus benchmark, but
+    not its own, was probably copied from the wrong series: FAIL if its own
+    yield minus benchmark is known (or it is a floating note), else WARN.
+    """
+    implied = [_implied_spread(t) for t in tranches]
+    for i, (t, r) in enumerate(zip(tranches, results)):
+        spread = _num(t.get("spread_bps"))
+        if spread is None:
+            continue
+        own = implied[i]
+        if own is not None and abs(own - spread) <= SPREAD_OK_BP:
+            continue
+        for j, other in enumerate(implied):
+            if j == i or other is None or abs(other - spread) > SPREAD_OK_BP:
+                continue
+            label = tranches[j].get("series_label") or tranches[j].get("maturity_date") or f"tranche {j + 1}"
+            floating = (t.get("rate_type") or "").lower() == "floating"
+            level = FAIL if (own is not None or floating) else WARN
+            r.add(level, "spread_bps",
+                  f"spread {spread:g} bp matches {label}'s yield minus benchmark ({other:.1f} bp), not this tranche's")
+            break

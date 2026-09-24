@@ -9,7 +9,8 @@ approved rows move over with promote.py.
 
 Usage:
     python scripts/extract_terms.py --url <FWP url> [--url ...]
-    python scripts/extract_terms.py --index
+    python scripts/extract_terms.py --index            # skips accessions already audited
+    python scripts/extract_terms.py --index --force    # reprocess everything
     python scripts/extract_terms.py --url <FWP url> --golden tests/golden/2025-04-28_usd.csv
 """
 
@@ -102,6 +103,7 @@ Rules:
 - spread_bps is the issue spread to the benchmark at pricing (e.g. "Spread to Benchmark Treasury"). Make-whole or redemption spreads ("Treasury Rate plus X basis points", "Bund Rate plus X basis points") are NOT the issue spread; never use them for spread_bps.
 - benchmark_yield_pct is the benchmark security's yield at pricing, not its coupon.
 - CUSIP is 9 characters with no spaces.
+- Floating rate notes: the margin over the floating index (e.g. SOFR plus a percentage) goes in floating_margin_bps, converted to basis points (a margin of 0.25% is 25). A margin over SOFR is not a spread to a benchmark: for floating notes, spread_bps and coupon_pct are null.
 """
 
 
@@ -151,6 +153,32 @@ def html_to_text(html: str) -> str:
 # --------------------------------------------------------------------------
 # Model
 # --------------------------------------------------------------------------
+
+EQUITY_TERMS = re.compile(r"Common Stock|Capital Stock|Depositary Shares", re.IGNORECASE)
+
+
+def cover(text: str) -> str:
+    """Title/cover and offering description: everything before the first "Issuer:"."""
+    i = text.find("Issuer:")
+    return text[:i] if i > 0 else text[:3000]
+
+
+def non_debt_reason(text: str) -> str | None:
+    c = cover(text)
+    if not re.search(r"Notes\s+due", c, re.IGNORECASE):
+        return 'no "Notes due" in cover'
+    m = EQUITY_TERMS.search(c)
+    if m:
+        return f'cover mentions "{m.group(0)}"'
+    return None
+
+
+def yield_basis_from_text(text: str) -> str | None:
+    """ "semi-annual" if the filing labels yields "(Semi-Annual / Annual)"."""
+    if re.search(r"Yield\s+to\s+Maturity\s*\(\s*Semi-Annual\s*/\s*Annual\s*\)", text, re.IGNORECASE):
+        return "semi-annual"
+    return None
+
 
 def extract(text: str, model: str) -> tuple[str, Deal]:
     r = requests.post(OLLAMA_URL, json={
@@ -231,8 +259,8 @@ def build_row(deal: Deal, t: Tranche, result: termcheck.CheckResult,
         "source_filing": f"FWP {deal.trade_date}" if deal.trade_date else "FWP",
         "source_url": url,
         "notes": ranking,
-        "cusip": t.cusip or "",
-        "isin": t.isin or "",
+        "cusip": re.sub(r"\s", "", t.cusip or ""),
+        "isin": re.sub(r"\s", "", t.isin or ""),
         "benchmark_yield_pct": num(t.benchmark_yield_pct, "{:.3f}"),
         "underwriting_discount_pct": num(t.underwriting_discount_pct, "{:.3f}"),
         "net_proceeds_local": num(t.net_proceeds, "{:.0f}"),
@@ -258,6 +286,25 @@ def existing_keys(path: Path) -> set:
         return set()
     df = pd.read_csv(path, dtype=str).fillna("")
     return {dedup_key(r.currency, r.maturity_date, r.coupon_pct) for r in df.itertuples()}
+
+
+def processed_accessions(path: Path) -> set[str]:
+    """Accessions that already have an entry in the audit log."""
+    if not path.exists():
+        return set()
+    done = set()
+    for line in path.read_text().splitlines():
+        if line.strip():
+            done.add(json.loads(line).get("accession", ""))
+    return done - {""}
+
+
+def split_processed(urls: list[str], done: set[str]) -> tuple[list[str], list[str]]:
+    """(to process, already processed) by accession."""
+    todo, skipped = [], []
+    for u in urls:
+        (skipped if accession_from_url(u) in done else todo).append(u)
+    return todo, skipped
 
 
 def append_pending(rows: list[dict]) -> None:
@@ -324,21 +371,30 @@ def print_summary(row: dict, dup: bool) -> None:
         print(f"    - {issue}")
 
 
-def process(url: str, args, pending_keys: set, db_keys: set) -> tuple[list[dict], list[dict]]:
+def process(url: str, args, pending_keys: set, db_keys: set,
+            write_audit: bool = True) -> tuple[list[dict], list[dict]]:
     text = html_to_text(fetch(url, args.user_agent))
     if "pricing term sheet" not in text.lower():
         print(f"SKIP {url}: no 'Pricing Term Sheet'")
+        return [], []
+    reason = non_debt_reason(text)
+    if reason:
+        print(f"SKIP (non-debt) {url}: {reason}")
         return [], []
     print(f"\n{url}")
     raw, deal = extract(text, args.model)
     currency = (deal.currency or "").upper()
     freq = args.freq or (2 if currency == "USD" else 1)
     prefix = benchmark_prefix(deal, text)
+    yield_basis = yield_basis_from_text(text)
+
+    dumped = [t.model_dump() for t in deal.tranches]
+    results = [termcheck.check_tranche(d, text, currency=currency, settlement_date=deal.settlement_date,
+                                       freq=freq, yield_basis=yield_basis) for d in dumped]
+    termcheck.check_deal(dumped, results)
 
     rows, audit_tranches, new_rows = [], [], []
-    for t in deal.tranches:
-        result = termcheck.check_tranche(t.model_dump(), text, currency=currency,
-                                         settlement_date=deal.settlement_date, freq=freq)
+    for t, result in zip(deal.tranches, results):
         row = build_row(deal, t, result, url, args.model, prefix)
         rows.append(row)
         key = dedup_key(currency, row["maturity_date"], row["coupon_pct"])
@@ -352,9 +408,12 @@ def process(url: str, args, pending_keys: set, db_keys: set) -> tuple[list[dict]
             new_rows.append(row)
             pending_keys.add(key)
 
+    if not write_audit:
+        return rows, new_rows
     with AUDIT.open("a") as f:
         f.write(json.dumps({"url": url, "accession": accession_from_url(url),
                             "model": args.model, "run_at": date.today().isoformat(),
+                            "yield_basis": yield_basis or f"coupon frequency ({freq}/yr)",
                             "raw_model_output": raw, "tranches": audit_tranches}) + "\n")
     return rows, new_rows
 
@@ -366,7 +425,10 @@ def main() -> None:
     p.add_argument("--index", action="store_true", help="process FWPs in data/filings_index.csv")
     p.add_argument("--model", default="qwen2.5:7b")
     p.add_argument("--freq", type=int, help="coupon frequency override (default 2 USD, 1 otherwise)")
-    p.add_argument("--golden", type=Path, help="golden CSV to compare against; exits 1 on mismatch")
+    p.add_argument("--golden", type=Path, help="golden CSV to compare against; exits 1 on mismatch. "
+                   "Writes nothing to the pending or audit files.")
+    p.add_argument("--force", action="store_true",
+                   help="with --index, reprocess FWPs already in the audit log")
     p.add_argument("--user-agent", default=os.environ.get("SEC_USER_AGENT"))
     args = p.parse_args()
 
@@ -375,21 +437,32 @@ def main() -> None:
     urls = list(args.url)
     if args.index:
         idx = pd.read_csv(DATA / "filings_index.csv")
-        urls += idx.loc[idx["form"] == "FWP", "url"].tolist()
+        index_urls = idx.loc[idx["form"] == "FWP", "url"].tolist()
+        if not args.force:
+            index_urls, skipped = split_processed(index_urls, processed_accessions(AUDIT))
+            print(f"Skipped {len(skipped)} FWPs already processed (see {AUDIT.name}; --force to redo)")
+        urls += index_urls
     if not urls:
+        if args.index:
+            print("No new FWPs to process.")
+            return
         sys.exit("Nothing to do: pass --url or --index.")
+    write = args.golden is None
 
     db_keys = existing_keys(TRANCHES)
     pending_keys = existing_keys(PENDING)
     all_rows, all_new = [], []
     for url in urls:
-        rows, new = process(url, args, pending_keys, db_keys)
+        rows, new = process(url, args, pending_keys, db_keys, write_audit=write)
         all_rows += rows
         all_new += new
 
-    append_pending(all_new)
-    print(f"\n{len(all_rows)} tranches extracted, {len(all_new)} new -> {PENDING.relative_to(ROOT)}")
-    print(f"Audit -> {AUDIT.relative_to(ROOT)}")
+    if write:
+        append_pending(all_new)
+        print(f"\n{len(all_rows)} tranches extracted, {len(all_new)} new -> {PENDING.relative_to(ROOT)}")
+        print(f"Audit -> {AUDIT.relative_to(ROOT)}")
+    else:
+        print(f"\n{len(all_rows)} tranches extracted (golden run: pending and audit files not written)")
 
     if args.golden:
         errors = compare_golden(all_rows, args.golden)
