@@ -83,10 +83,11 @@ def load_rows(tmp_path, rows, y=None, as_of=AS_OF):
 
 def test_market_yields_file_marks_usd_refi():
     y = treasury.read_market_yields()
-    usd = y[y["currency"] == "USD"]
-    assert list(usd["rate_type"]) == ["refi"]
-    assert list(usd["refi_yield_pct"]) == [5.05]
+    usd_refi = y[(y["currency"] == "USD") & (y["rate_type"] == "refi")]
+    assert list(usd_refi["refi_yield_pct"]) == [5.05]
     assert "index_name" in y.columns
+    # Index rows (e.g. SOFR) are typed "index", never "refi".
+    assert set(y.loc[y["index_name"] != "", "rate_type"]) <= {"index"}
 
 
 def test_missing_refi_row_skips_currency_without_nan(tmp_path):

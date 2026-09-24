@@ -1,2 +1,7 @@
 currency,refi_yield_pct,as_of,source,rate_type,index_name
 USD,5.05,2026-09-10,Atlantis Data Solutions - Alphabet 4.000% Notes due 2030 CUSIP 02079KAK3,refi,
+EUR,3.923,2026-05-11,Principal-weighted re-offer yield of Alphabet EUR deal settled 2026-05-11 (FWP 2026-05-05; 6 tranches 3.227-4.842%),refi,
+GBP,5.308,2026-02-13,Principal-weighted re-offer yield of Alphabet GBP deal settled 2026-02-13 (FWP 2026-02-10; 5 tranches 4.100-6.050%),refi,
+CAD,4.415,2026-05-11,Principal-weighted re-offer yield of Alphabet CAD deal settled 2026-05-11 (FWP 2026-05-05; 4 tranches 3.774-5.063%),refi,
+JPY,2.648,2026-05-21,Principal-weighted re-offer yield of Alphabet JPY deal settled 2026-05-21 (FWP 2026-05-15; 7 tranches 1.965-4.599%),refi,
+USD,,TODO,"TODO: NY Fed 30-day SOFR Average - fill value, date, and source",index,SOFR
