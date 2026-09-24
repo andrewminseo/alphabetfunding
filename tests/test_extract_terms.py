@@ -1,8 +1,10 @@
 """Offline tests for the deterministic parts of scripts/extract_terms.py."""
 
+import json
 import sys
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -99,3 +101,97 @@ def test_console_summary_keeps_issue_messages_whole(capsys):
     et.print_summary(row, False, issues)
     out = capsys.readouterr().out
     assert "    - WARN spread_bps: spread missing; yield minus benchmark = 33.0 bp\n" in out
+
+
+# --- Pricing Term Sheet phrase ---------------------------------------------
+
+def test_pricing_term_sheet_split_across_lines():
+    # August 2020 original FWP: <B>Pricing Term\nSheet </B>
+    assert et.has_pricing_term_sheet("2.250% Notes due 2060\nPricing Term\nSheet\nIssuer: |")
+    assert not et.has_pricing_term_sheet("Issuer Free Writing Prospectus dated June 1, 2026")
+
+
+# --- Superseded filings (same CUSIPs, filed later) -------------------------
+
+def test_cusips_in_text_validates_and_needs_a_letter():
+    text = "CUSIP/ISIN: | 2030 Notes: 02079K AK3 / US02079KAK34 2035 Notes: 02079KAL1 | 123456782 | 02079KAK4"
+    assert et.cusips_in_text(text) == {"02079KAK3", "02079KAL1"}  # bad check digit and all-digit token dropped
+
+
+def test_later_filing_with_same_cusips_supersedes():
+    a, b = "https://x/1652044/000119312520208301/d.htm", "https://x/1652044/000119312520208486/d.htm"
+    c = "https://x/1652044/000119312525100802/d.htm"
+    same = frozenset({"02079KAD9", "02079KAE7"})
+    sup = et.superseded([(b, "2020-08-04", same), (a, "2020-08-03", same),
+                         (c, "2025-04-28", frozenset({"02079KAK3"}))])
+    assert sup == {a: b}
+
+
+def test_no_cusips_never_grouped_and_subsets_not_merged():
+    a, b = "https://x/1/000000000000000001/a.htm", "https://x/1/000000000000000002/b.htm"
+    assert et.superseded([(a, "2020-01-01", frozenset()), (b, "2020-01-02", frozenset())]) == {}
+    assert et.superseded([(a, "2020-01-01", frozenset({"02079KAD9"})),
+                          (b, "2020-01-02", frozenset({"02079KAD9", "02079KAE7"}))]) == {}
+
+
+# --- German benchmark prefixes ---------------------------------------------
+
+@pytest.mark.parametrize("desc,expected", [
+    ("OBL 2.100% due April 12, 2029", "OBL 2.100% due 2029-04-12"),
+    ("DBR 2.300% due February 15, 2033", "DBR 2.300% due 2033-02-15"),
+    ("BKO 1.900% due September 16, 2027", "BKO 1.900% due 2027-09-16"),
+    ("2.500% due July 4, 2044", "DBR 2.500% due 2044-07-04"),  # no printed prefix: Bund default
+])
+def test_german_benchmark_prefix(desc, expected):
+    t = et.Tranche(**{f: None for f in et.Tranche.model_fields} | {"benchmark_description": desc})
+    assert et.fmt_benchmark(t, "DBR") == expected
+
+
+# --- --recheck -------------------------------------------------------------
+
+RECHECK_HTML = """<p>Pricing Term Sheet</p><table>
+<tr><td>Aggregate Principal Amount:</td><td>2030 Notes: $750,000,000</td></tr>
+<tr><td>Maturity Date:</td><td>2030 Notes: May 15, 2030</td></tr>
+<tr><td>Coupon (Interest Rate):</td><td>2030 Notes: 4.000% per annum</td></tr>
+<tr><td>Public Offering Price:</td><td>2030 Notes: 99.417%</td></tr>
+<tr><td>Yield to Maturity:</td><td>2030 Notes: 4.129%</td></tr>
+<tr><td>Spread to Benchmark Treasury:</td><td>2030 Notes: T + 32 bps</td></tr>
+<tr><td>Benchmark Treasury Price and Yield:</td><td>2030 Notes: 100-09+ / 3.809%</td></tr>
+<tr><td>CUSIP/ISIN:</td><td>2030 Notes: 02079K AK3</td></tr></table>"""
+ACC = "0001193125-25-100802"
+
+
+def recheck_env(tmp_path, monkeypatch, spread, status, approved):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / f"fwp_{ACC}_d.htm").write_text(RECHECK_HTML)
+    monkeypatch.setattr(et, "RAW", raw)
+    monkeypatch.setattr(et, "extract", lambda *a, **k: pytest.fail("recheck must not call the model"))
+    row = {c: "" for c in et.PENDING_COLS} | {
+        "tranche_id": "GOOGL-2025-05-2030", "currency": "USD", "principal_local": "750000000",
+        "coupon_pct": "4.000", "issue_price_pct": "99.417", "issue_yield_pct": "4.129",
+        "issue_spread_bps": spread, "issue_date": "2025-05-01", "maturity_date": "2030-05-15",
+        "rate_type": "fixed", "cusip": "02079KAK3", "benchmark_yield_pct": "3.809",
+        "source_accession": ACC, "status": status, "issues": "old issue", "approved": approved}
+    pending = tmp_path / "pending.csv"
+    pd.DataFrame([row], columns=et.PENDING_COLS).to_csv(pending, index=False)
+    audit = tmp_path / "audit.jsonl"
+    audit.write_text(json.dumps({"accession": ACC, "raw_model_output": json.dumps(
+        {"tranches": [{"series_label": "2030 Notes", "cusip": "02079KAK3"}]})}) + "\n")
+    return pending, audit
+
+
+def test_recheck_updates_status_and_keeps_approval(tmp_path, monkeypatch):
+    # Row was FAIL with a wrong spread; the reviewer fixed the spread by hand.
+    pending, audit = recheck_env(tmp_path, monkeypatch, "32", "FAIL", "yes")
+    changes = et.recheck(pending, audit)
+    out = pd.read_csv(pending, dtype=str).fillna("").iloc[0]
+    assert (out["status"], out["issues"], out["approved"]) == ("PASS", "", "yes")
+    assert changes == [("GOOGL-2025-05-2030", "FAIL", "PASS")]
+
+
+def test_recheck_flags_bad_edit(tmp_path, monkeypatch):
+    pending, audit = recheck_env(tmp_path, monkeypatch, "47", "PASS", "")
+    et.recheck(pending, audit)
+    out = pd.read_csv(pending, dtype=str).fillna("").iloc[0]
+    assert out["status"] == "FAIL" and "spread_bps" in out["issues"]

@@ -11,6 +11,7 @@ Usage:
     python scripts/extract_terms.py --url <FWP url> [--url ...]
     python scripts/extract_terms.py --index            # skips accessions already audited
     python scripts/extract_terms.py --index --force    # reprocess everything
+    python scripts/extract_terms.py --recheck          # re-run termcheck on pending rows
     python scripts/extract_terms.py --url <FWP url> --golden tests/golden/2025-04-28_usd.csv
 """
 
@@ -60,6 +61,9 @@ EXTRA_COLS = [
 PENDING_COLS = BASE_COLS + EXTRA_COLS
 
 BENCHMARK_PREFIX = {"treasury": "UST", "bund": "DBR", "gilt": "UKT"}
+# German federal securities: Bund (DBR), Bobl (OBL), Schatz (BKO). When the
+# filing prints one of these before the benchmark, that label is used.
+GERMAN_PREFIXES = ("OBL", "DBR", "BKO")
 
 
 # --------------------------------------------------------------------------
@@ -103,7 +107,6 @@ Rules:
 - Percentages as plain numbers (4.000% -> 4.0). Basis points as plain numbers ("T + 32 bps" -> 32). Dates as YYYY-MM-DD. Principal and net proceeds in full currency units ($750,000,000 -> 750000000).
 - spread_bps is the issue spread to the benchmark at pricing (e.g. "Spread to Benchmark Treasury"). Make-whole or redemption spreads ("Treasury Rate plus X basis points", "Bund Rate plus X basis points") are NOT the issue spread; never use them for spread_bps.
 - benchmark_yield_pct is the benchmark security's yield at pricing, not its coupon.
-- When a filing gives more than one spread for a note, report the spread measured against the benchmark security whose yield you report in benchmark_yield_pct.
 - CUSIP is 9 characters with no spaces.
 - Floating rate notes: the margin over the floating index (e.g. SOFR plus a percentage) goes in floating_margin_bps, converted to basis points (a margin of 0.25% is 25). A margin over SOFR is not a spread to a benchmark: for floating notes, spread_bps and coupon_pct are null.
 """
@@ -155,6 +158,41 @@ def html_to_text(html: str) -> str:
 # --------------------------------------------------------------------------
 # Model
 # --------------------------------------------------------------------------
+
+def has_pricing_term_sheet(text: str) -> bool:
+    """Checked on whitespace-normalized text: filings break the phrase across
+    lines ("Pricing Term\nSheet")."""
+    return "pricing term sheet" in termcheck.normalize_text(text).lower()
+
+
+_CUSIP_TOKEN = re.compile(r"(?<![0-9A-Z])([0-9]{3}[0-9A-Z]{3})\s?([0-9A-Z]{2}[0-9])(?![0-9A-Z])")
+
+
+def cusips_in_text(text: str) -> frozenset[str]:
+    """Valid CUSIPs printed in the filing (check digit verified; at least one
+    letter, so plain 9-digit numbers can't pass by chance)."""
+    found = set()
+    for m in _CUSIP_TOKEN.finditer(termcheck.normalize_text(text).upper()):
+        c = m.group(1) + m.group(2)
+        if re.search(r"[A-Z]", c) and termcheck.valid_cusip(c):
+            found.add(c)
+    return frozenset(found)
+
+
+def superseded(filings: list[tuple[str, str, frozenset]]) -> dict[str, str]:
+    """{url: superseding url} for FWPs whose CUSIP set is identical to a later
+    filing's. filings: (url, filing_date, cusips). Later date wins; on the same
+    date, the higher accession. Filings with no CUSIPs are never grouped."""
+    latest: dict[frozenset, tuple[str, str, str]] = {}
+    for url, filed, cus in filings:
+        if not cus:
+            continue
+        key = (filed, accession_from_url(url), url)
+        if cus not in latest or key > latest[cus]:
+            latest[cus] = key
+    return {url: latest[cus][2] for url, filed, cus in filings
+            if cus and latest[cus][2] != url}
+
 
 EQUITY_TERMS = re.compile(r"Common Stock|Capital Stock|Depositary Shares", re.IGNORECASE)
 
@@ -216,6 +254,9 @@ def fmt_benchmark(t: Tranche, prefix: str | None) -> str:
     desc = (t.benchmark_description or "").strip()
     if not desc:
         return ""
+    lead = re.match(r"([A-Z]{3})\s", desc)
+    if lead and lead.group(1) in GERMAN_PREFIXES:
+        prefix = lead.group(1)
     m = re.search(r"(\d+(?:\.\d+)?)\s*%\s*due\s+(.+)", desc, re.IGNORECASE)
     if prefix and m:
         try:
@@ -363,6 +404,95 @@ def compare_golden(rows: list[dict], golden_path: Path) -> list[str]:
 # Main
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# Recheck
+# --------------------------------------------------------------------------
+
+# pending column -> termcheck field
+RECHECK_FIELDS = {
+    "principal_local": "principal", "coupon_pct": "coupon_pct",
+    "maturity_date": "maturity_date", "issue_price_pct": "issue_price_pct",
+    "underwriting_discount_pct": "underwriting_discount_pct",
+    "net_proceeds_local": "net_proceeds", "issue_yield_pct": "issue_yield_pct",
+    "issue_spread_bps": "spread_bps", "benchmark_yield_pct": "benchmark_yield_pct",
+    "floating_margin_bps": "floating_margin_bps", "cusip": "cusip", "isin": "isin",
+    "rate_type": "rate_type",
+}
+TEXT_FIELDS = {"maturity_date", "cusip", "isin", "rate_type"}
+
+
+def cached_text(accession: str) -> str | None:
+    hits = sorted(RAW.glob(f"fwp_{accession}_*"))
+    return html_to_text(hits[0].read_bytes().decode("utf-8", errors="replace")) if hits else None
+
+
+def audit_labels(path: Path) -> dict[tuple[str, str], dict]:
+    """(accession, CUSIP) -> {series_label, floating_index} from the latest audit
+    entry per accession. These fields are not stored in the pending file."""
+    out: dict[tuple[str, str], dict] = {}
+    if not path.exists():
+        return out
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        a = json.loads(line)
+        try:
+            raw = json.loads(a.get("raw_model_output", "{}"))
+        except json.JSONDecodeError:
+            continue
+        for t in raw.get("tranches", []):
+            cusip = re.sub(r"\s", "", t.get("cusip") or "").upper()
+            if cusip:
+                out[(a.get("accession", ""), cusip)] = {
+                    "series_label": t.get("series_label"),
+                    "floating_index": t.get("floating_index"),
+                }
+    return out
+
+
+def row_to_tranche(row: dict, labels: dict) -> dict:
+    t = {}
+    for col, fld in RECHECK_FIELDS.items():
+        v = str(row.get(col, "")).strip()
+        t[fld] = (v if fld in TEXT_FIELDS else float(v)) if v else None
+    t.update(labels.get((row.get("source_accession", ""), (t["cusip"] or "").upper()),
+                        {"series_label": None, "floating_index": None}))
+    return t
+
+
+def recheck(pending_path: Path = None, audit_path: Path = None) -> list[tuple[str, str, str]]:
+    """Re-run termcheck (and check_deal) on pending rows; update status and
+    issues in place. Everything else, approvals included, is kept.
+    Returns [(tranche_id, old status, new status)] for rows that changed."""
+    pending_path = pending_path or PENDING
+    audit_path = audit_path or AUDIT
+    df = pd.read_csv(pending_path, dtype=str).fillna("")
+    labels = audit_labels(audit_path)
+    changes = []
+    for acc, group in df.groupby("source_accession", sort=False):
+        text = cached_text(acc)
+        if text is None:
+            print(f"  {acc}: no cached filing in {RAW.relative_to(ROOT)}; {len(group)} rows left unchanged")
+            continue
+        basis = yield_basis_from_text(text)
+        tranches = [row_to_tranche(r, labels) for r in group.to_dict("records")]
+        results = []
+        for (i, r), t in zip(group.iterrows(), tranches):
+            ccy = r["currency"].upper()
+            results.append(termcheck.check_tranche(
+                t, text, currency=ccy, settlement_date=r["issue_date"] or None,
+                freq=2 if ccy == "USD" else 1, yield_basis=basis))
+        termcheck.check_deal(tranches, results)
+        for (i, r), res in zip(group.iterrows(), results):
+            issues = "; ".join(f"{x.level} {x.field}: {x.message}" for x in res.issues)
+            if (res.status, issues) != (r["status"], r["issues"]):
+                changes.append((r["tranche_id"], r["status"], res.status))
+            df.at[i, "status"] = res.status
+            df.at[i, "issues"] = issues
+    df.to_csv(pending_path, index=False)
+    return changes
+
+
 def print_summary(row: dict, dup: bool, issues: list) -> None:
     tag = row["status"] + ("  DUPLICATE (already in tranches.csv)" if dup else "")
     print(f"  {row['tranche_id'] or '(no id)':<26} {tag}")
@@ -378,7 +508,7 @@ def print_summary(row: dict, dup: bool, issues: list) -> None:
 def process(url: str, args, pending_keys: set, db_keys: set,
             write_audit: bool = True) -> tuple[list[dict], list[dict]]:
     text = html_to_text(fetch(url, args.user_agent))
-    if "pricing term sheet" not in text.lower():
+    if not has_pricing_term_sheet(text):
         print(f"SKIP {url}: no 'Pricing Term Sheet'")
         return [], []
     reason = non_debt_reason(text)
@@ -434,15 +564,37 @@ def main() -> None:
                    "Writes nothing to the pending or audit files.")
     p.add_argument("--force", action="store_true",
                    help="with --index, reprocess FWPs already in the audit log")
+    p.add_argument("--recheck", action="store_true",
+                   help="re-run termcheck on tranches_pending.csv with cached filings; no model calls")
     p.add_argument("--user-agent", default=os.environ.get("SEC_USER_AGENT"))
     args = p.parse_args()
+
+    if args.recheck:
+        if not PENDING.exists():
+            sys.exit(f"No {PENDING.name} to recheck.")
+        changes = recheck()
+        df = pd.read_csv(PENDING, dtype=str).fillna("")
+        print(f"Rechecked {len(df)} pending rows: " +
+              ", ".join(f"{s} {n}" for s, n in df["status"].value_counts().items()))
+        for tid, old, new in changes:
+            print(f"  {tid}: {old} -> {new}" + ("" if old != new else " (issues changed)"))
+        if not changes:
+            print("  no changes")
+        return
 
     if not args.user_agent:
         sys.exit("Set --user-agent or SEC_USER_AGENT (name + email), per SEC policy.")
     urls = list(args.url)
     if args.index:
         idx = pd.read_csv(DATA / "filings_index.csv")
-        index_urls = idx.loc[idx["form"] == "FWP", "url"].tolist()
+        fwps = idx[idx["form"] == "FWP"]
+        index_urls = fwps["url"].tolist()
+        filings = [(u, str(d)[:10], cusips_in_text(html_to_text(fetch(u, args.user_agent))))
+                   for u, d in zip(fwps["url"], fwps["filingDate"])]
+        sup = superseded(filings)
+        for u, by in sup.items():
+            print(f"SKIP (superseded by {accession_from_url(by)}: same CUSIPs, filed later) {u}")
+        index_urls = [u for u in index_urls if u not in sup]
         if not args.force:
             index_urls, skipped = split_processed(index_urls, processed_accessions(AUDIT))
             print(f"Skipped {len(skipped)} FWPs already processed (see {AUDIT.name}; --force to redo)")
