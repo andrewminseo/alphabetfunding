@@ -84,7 +84,8 @@ def load_rows(tmp_path, rows, y=None, as_of=AS_OF):
 def test_market_yields_file_marks_usd_refi():
     y = treasury.read_market_yields()
     usd_refi = y[(y["currency"] == "USD") & (y["rate_type"] == "refi")]
-    assert list(usd_refi["refi_yield_pct"]) == [5.05]
+    # August 2026 USD deal, principal-weighted over the 8 fixed-rate tranches
+    assert list(usd_refi["refi_yield_pct"]) == [5.665]
     assert "index_name" in y.columns
     # Index rows (e.g. SOFR) are typed "index", never "refi".
     assert set(y.loc[y["index_name"] != "", "rate_type"]) <= {"index"}
