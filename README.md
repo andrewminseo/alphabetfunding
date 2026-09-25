@@ -1,90 +1,109 @@
 # Alphabet Treasury Lab
 
-Tracking how Alphabet funds its AI infrastructure buildout: what it borrows, in which currencies, at what cost, and when it comes due.
+A treasury monitor for Alphabet built from public data. It reconstructs Alphabet's bond portfolio from SEC filings, one row per note, and uses that to look at debt outstanding, currency mix, maturities, interest cost, and refinancing exposure.
 
-## Setup
+## Current snapshot
+
+As of September 25, 2026, from `scripts/treasury.py` (face value, non-USD notes converted at current FX):
+
+| | |
+|---|---|
+| Debt tracked | $119.0B |
+| Notes | 67 |
+| Weighted average coupon | 4.43% |
+| Weighted average maturity | 16.6 years |
+| Annual coupon cost | $5.2B |
+| Maturing within five years | $30.3B |
+
+Currency mix: USD 64.3%, EUR 21.4%, GBP 6.2%, CAD 5.1%, JPY 3.1%.
+
+The script also writes a maturity ladder by currency (`output/maturity_ladder.png`) and a refinancing sensitivity table (`output/refi_sensitivity.csv`).
+
+Refinancing the notes that mature within five years raises annual interest cost even if yields fall 100bp. Those notes carry an average coupon of about 3.5%, below the refinancing yields used here (the latest deal in each currency). CAD and JPY are the exceptions: at -100bp their refinancing yields fall below the coupons on their maturing notes. The $1.8B of floating-rate notes is not in these figures (see Limitations).
+
+## Reconciliation
+
+As a cross-check, the database is compared with the long-term debt Alphabet reports in XBRL. At December 31, 2025:
+
+- The database has $49.07B of face value across 29 notes outstanding on that date, converted at December 31, 2025 FX rates.
+- Alphabet reported $49.09B of `LongTermDebt`, which matches the total face value in the 10-K debt footnote.
+- The gap is about -$16M, from the EUR rate. The 10-K implies about 1.1762 USD per euro for its euro notes ($15,585M for €13,250M); the database uses the ECB reference rate for that date, 1.1750.
+
+Every series in the 10-K debt footnote is now in the database. The last one added was the 2016 US dollar notes (1.998%, due August 2026), taken from the 2016 prospectus supplement and pricing term sheet. Those notes have since matured, so they count here but not in the current snapshot.
+
+Another $72.87B across 39 notes was issued after December 31, 2025 and is outside that comparison.
+
+The two figures aren't expected to match exactly. Missing notes, FX translation, and differences between face value and reported amounts all affect the comparison.
+
+## How the database is built
+
+```
+SEC filings -> extraction -> validation -> my review -> tranche database -> analysis
+```
+
+Most notes come from the pricing term sheets (FWP filings) Alphabet files for each bond deal. A local language model reads each term sheet and fills in the terms: size, coupon, maturity, price, yield, spread, benchmark, and CUSIP.
+
+Extracted terms are not accepted automatically. Each note is checked against the source filing:
+
+- every number has to appear in the filing, and size, coupon, and maturity have to appear under that note's own label
+- the yield recalculated from the price has to match the stated yield
+- the spread has to equal yield minus benchmark yield
+- net proceeds have to equal principal times price less the underwriting discount
+- CUSIP and ISIN check digits have to be valid
+
+Each note is marked PASS, WARN, or FAIL and goes into a pending file. I review each one against the filing, and only notes I approve are added to `data/tranches.csv`. FAIL notes can't be promoted.
+
+Notes without a pricing term sheet can be added by hand from the prospectus supplement or the 10-K/10-Q debt footnote. Every row carries its source filing and URL. If a number can't be traced to a document, it doesn't go in.
+
+## Limitations
+
+- **Floating-rate notes.** $1.8B of floating-rate notes is left out of coupon cost and weighted average coupon until a SOFR rate is entered in `data/market_yields.csv`.
+- **Refinancing sensitivity.** Only currencies with a refinancing yield in `data/market_yields.csv` are included.
+  - Each currency uses the principal-weighted re-offer yield of Alphabet's most recent deal in that currency (for USD, the fixed-rate notes from the August 2026 deal). These are new-issue yields at the time of each deal, not current market levels.
+  - This assumes maturing notes are replaced at the same maturity mix as that latest deal.
+  - Each note is assumed to be refinanced 1:1 in the same currency, with FX held constant and no swaps.
+- **Face value.** The analysis uses face value, not carrying value.
+- **FX.** The current snapshot uses one FX snapshot, not issue-date rates.
+- **Coverage.** Coverage is limited to notes that are in the database. See the reconciliation above.
+
+## Data sources
+
+- **SEC EDGAR:** filing index, pricing term sheets, and XBRL company facts (reported debt totals, debt maturities, interest expense)
+- **FX:** ECB reference rates via the Frankfurter API, current and as of the reconciliation date
+- **U.S. Treasury:** Daily Par Yield Curve Rates, saved to `data/treasury_curve.csv` for reference (not yet used in the calculations)
+- **Refinancing yields:** entered by hand in `data/market_yields.csv`, with the source on each row
+
+## Running it
 
 ```bash
 pip install -r requirements.txt
-export SEC_USER_AGENT="Your Name you@umich.edu"   # SEC requires name + email
-```
+export SEC_USER_AGENT="Your Name you@example.com"   # SEC requires name + email
+ollama pull qwen2.5:14b                               # local model, needs ~10 GB free memory
 
-## Workflow
-
-**1. Run the pipeline**
-
-```bash
-ollama serve                          # local model for extraction (ollama pull qwen2.5:14b)
-python scripts/run_pipeline.py
-```
-
-It runs these steps in order and stops at the first error:
-
-| Step | What it does |
-|---|---|
-| `edgar_pull.py` | Refreshes `data/filings_index.csv` (10-K, 10-Q, 8-K, 424B2, FWP) and `data/xbrl_debt_facts.csv` |
-| `extract_terms.py --index` | Extracts tranches from new FWP pricing term sheets into `data/tranches_pending.csv`; FWPs already in `data/extraction_audit.jsonl` are skipped (`--force` to redo) |
-| `update_fx.py` | Refreshes `data/fx_rates.csv` |
-| `update_yields.py` | Writes the latest U.S. Treasury par yield curve to `data/treasury_curve.csv` |
-| `treasury.py` | Summary, maturity ladder, refinancing sensitivity -> `output/` |
-| reconciliation | Live tranche face value in USD vs. latest reported `LongTermDebt` |
-
-Extraction uses `qwen2.5:14b` by default, which needs about 10 GB of free memory. On smaller machines, run `python scripts/extract_terms.py --index --model qwen2.5:7b` instead: it works, but makes more mistakes, so expect more WARN and FAIL rows to review.
-
-It ends with a summary: new filings, new pending rows by status, rows needing your review, and the reconciliation gap. It never promotes anything.
-
-**2. Review pending rows.** Open `data/tranches_pending.csv`. Each row has a `status` (PASS / WARN / FAIL) and `issues`; the evidence snippets and raw model output are in `data/extraction_audit.jsonl`. Check each row against the filing and set `approved` to `yes` on the ones you've verified.
-
-The model only does data entry. Every tranche is checked by `scripts/termcheck.py`: every number must appear in the filing, CUSIP/ISIN check digits must be valid, the yield recomputed from the price must match, spread must equal yield minus benchmark yield, net proceeds must add up, and the currency must match the symbol on the principal amount. Non-debt FWPs (equity offerings) are skipped before the model sees them.
-
-**3. Promote and re-run the analytics**
-
-```bash
-python scripts/promote.py             # approved, non-FAIL rows -> tranches.csv
+python scripts/run_pipeline.py    # pull filings, extract new term sheets, update FX and
+                                  # Treasury yields, run analysis and reconciliation
+# review data/tranches_pending.csv; set approved = yes on rows you've checked
+python scripts/promote.py         # approved rows -> data/tranches.csv
 python scripts/treasury.py
-python scripts/reconcile.py
 ```
 
-**Adding tranches by hand.** Notes without an FWP pricing term sheet go into `data/tranches.csv` directly. Fill in `source_filing` and `source_url` for every row; if a number can't be traced to a document, it doesn't go in.
+On machines with less memory, `python scripts/extract_terms.py --index --model qwen2.5:7b` works but makes more mistakes, so more rows get flagged.
 
-| Source | What it gives you |
-|---|---|
-| 424B2 prospectus supplements | Exact coupon, size, maturity, and pricing for USD deals |
-| 8-K filings around issuance dates | Underwriting agreements and note forms, often with foreign-currency deal terms |
-| 10-K / 10-Q debt footnote | Outstanding notes by currency, coupon ranges, total carrying value |
-| Bloomberg (Ross terminals) | Tranche-level data for non-USD deals, yields and spreads at issue |
-
-**Reconciliation.** The tranche total should land close to reported `LongTermDebt`. Differences come from FX, discounts and issuance costs, notes issued after the XBRL period end (reported separately), and any notes you've missed. Chase down anything large.
-
-**Checks.** Offline tests: `pytest`. Extraction regression against hand-verified values (writes nothing to the pending or audit files):
+`pytest` runs the offline tests. To check extraction against a hand-verified deal (the April 2025 USD notes):
 
 ```bash
-python scripts/extract_terms.py --url https://www.sec.gov/Archives/edgar/data/1652044/000119312525100802/d806252dfwp.htm --golden tests/golden/2025-04-28_usd.csv
+python scripts/extract_terms.py --golden tests/golden/2025-04-28_usd.csv \
+  --url https://www.sec.gov/Archives/edgar/data/1652044/000119312525100802/d806252dfwp.htm
 ```
 
-## Data files
+## Layout
 
-| File | Contents |
-|---|---|
-| `data/tranches.csv` | Your real database. |
-| `data/fx_rates.csv` | USD per unit of each currency |
-| `data/market_yields.csv` | Your refinancing yield estimate by currency (used by `treasury.py`) |
-| `data/treasury_curve.csv` | Latest U.S. Treasury par yield curve, one row per tenor |
-| `data/tranches_pending.csv` | Extracted tranches awaiting your review |
-| `data/extraction_audit.jsonl` | Raw model output, issues, and evidence per processed FWP |
-
-## Model limitations
-
-- Refinancing sensitivity assumes each tranche is rolled over 1:1 in the same currency, with FX held constant and no swaps.
-- USD conversion uses a single FX snapshot, not issue-date rates.
-- Carrying value differs from face value; this model uses face value.
-
-## Roadmap
-
-- [ ] Real tranche database, reconciled to reported debt
-- [ ] Research note: non-USD issuance and swapped-to-USD cost
-- [ ] Issue-date FX and USD-equivalent at issuance
-- [ ] Spread at issuance vs. benchmark (FRED for USD)
-- [ ] Peers: Amazon, Meta, Microsoft
-- [ ] Streamlit dashboard
-- [ ] Funding map: leases, guarantees, third-party structures (sourced, estimates labeled)
+```
+data/tranches.csv          the note database
+data/tranches_pending.csv  extracted notes awaiting review
+data/market_yields.csv     refinancing yields and index rates
+scripts/treasury.py        portfolio analytics
+scripts/reconcile.py       comparison with reported debt
+scripts/extract_terms.py   term-sheet extraction
+scripts/termcheck.py       checks against the source filing
+```
