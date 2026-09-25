@@ -295,3 +295,22 @@ def test_no_yield_solves_price():
     msgs = [i.message for i in r.issues if i.field == "issue_yield_pct"]
     assert any("no yield solves this price" in m for m in msgs)
     assert not any("50.000" in m for m in msgs)
+
+
+@pytest.mark.parametrize("written", ["August 15th, 2026", "August 15 th , 2026", "15th August 2026"])
+def test_dates_with_ordinal_suffix(written):
+    # August 2016 FWP: "Maturity Date: | August 15 th , 2026" (superscript "th")
+    text = (f"1.998% Notes due 2026\nAggregate Principal Amount: | $2,000,000,000\n"
+            f"Maturity Date: | {written}\nCoupon (Interest Rate): | 1.998% per annum")
+    t = {"series_label": "1.998% Notes due 2026", "rate_type": "fixed", "principal": 2000000000,
+         "coupon_pct": 1.998, "maturity_date": "2026-08-15"}
+    r = tc.check_tranche(t, text, currency="USD", settlement_date="2016-08-09", freq=2)
+    assert not [i for i in r.issues if i.field == "maturity_date"], r.issues
+
+
+def test_ordinal_does_not_hide_wrong_date():
+    text = "Notes due 2026\nMaturity Date: | August 15 th , 2026\nAggregate Principal Amount: | $1"
+    t = {"series_label": "Notes due 2026", "rate_type": "fixed", "principal": 1,
+         "coupon_pct": None, "maturity_date": "2026-05-15"}
+    r = tc.check_tranche(t, text, currency="USD", settlement_date="2016-08-09", freq=2)
+    assert any(i.field == "maturity_date" and i.level == tc.FAIL for i in r.issues)

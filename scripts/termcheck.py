@@ -273,7 +273,9 @@ SECTIONS = {
 _ROW_LABEL = re.compile(r"(?:^|(?<=\s))[A-Z][A-Za-z ()/&'’*\-]{0,80}:\s*\|")
 _SERIES = re.compile(r"(\d{4})\s+(Floating\s+Rate\s+)?Notes\s*:", re.IGNORECASE)
 _HEADING = re.compile(r"(Floating\s+Rate\s+)?Notes\s+due\s+(\d{4})", re.IGNORECASE)
-_DATE_RE = re.compile(r"[A-Z][a-z]+\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+[A-Z][a-z]+\s+\d{4}")
+# Day may carry an ordinal suffix, sometimes split off by a superscript ("15 th ,").
+_ORD = r"(?:\s?(?:st|nd|rd|th))?"
+_DATE_RE = re.compile(rf"[A-Z][a-z]+\s+\d{{1,2}}{_ORD}\s*,?\s+\d{{4}}|\d{{1,2}}{_ORD}\s+[A-Z][a-z]+\s+\d{{4}}")
 
 
 def series_key(label: str | None) -> tuple[str, bool] | None:
@@ -327,7 +329,8 @@ def _entry_matches(field: str, entry: str, value) -> bool:
 
 def pd_date(s: str) -> str:
     from datetime import datetime
-    s = re.sub(r"\s+", " ", s.replace(",", ""))
+    s = re.sub(r"(\d)\s?(?:st|nd|rd|th)\b", r"\1", s.replace(",", ""))
+    s = re.sub(r"\s+", " ", s).strip()
     for fmt in ("%B %d %Y", "%d %B %Y"):
         try:
             return datetime.strptime(s, fmt).date().isoformat()
@@ -360,8 +363,8 @@ def find_date(text: str, value) -> str | None:
     d = _to_date(value)
     month = d.strftime("%B")
     patterns = [
-        rf"{month}\s+{d.day},?\s+{d.year}",
-        rf"{d.day}\s+{month},?\s+{d.year}",
+        rf"{month}\s+{d.day}{_ORD}\s*,?\s+{d.year}",
+        rf"{d.day}{_ORD}\s+{month},?\s+{d.year}",
         re.escape(d.isoformat()),
     ]
     for p in patterns:
