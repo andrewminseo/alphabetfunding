@@ -287,13 +287,17 @@ def series_key(label: str | None) -> tuple[str, bool] | None:
     return (m.group(0), "floating" in label.lower()) if m else None
 
 
-def section_entries(text: str, field: str) -> dict[tuple[str, bool], str] | None:
+ANY_SERIES = ("*", False)  # key for an unlabeled section with no heading
+
+
+def section_entries(text: str, field: str, pattern: str | None = None
+                    ) -> dict[tuple[str, bool], str] | None:
     """{series key: entry text} for every labeled section of `field` in the
     (normalized) text. An unlabeled section takes its key from the nearest
     preceding "... Notes due YYYY" heading. None if the section is absent."""
     found = False
     entries: dict[tuple[str, bool], str] = {}
-    for m in re.finditer(rf"(?:^|(?<=\s))(?:{SECTIONS[field]})\s*:\s*\|", text):
+    for m in re.finditer(rf"(?:^|(?<=\s))(?:{pattern or SECTIONS[field]})\s*:\s*\|", text):
         found = True
         nxt = _ROW_LABEL.search(text, m.end())
         body = text[m.end():nxt.start() if nxt else len(text)]
@@ -307,6 +311,8 @@ def section_entries(text: str, field: str) -> dict[tuple[str, bool], str] | None
             if heads:
                 h = heads[-1]
                 entries.setdefault((h.group(2), bool(h.group(1))), body.strip())
+            else:
+                entries.setdefault(ANY_SERIES, body.strip())
     return entries if found else None
 
 
@@ -359,6 +365,49 @@ def check_series_fields(t: dict, text: str, r: "CheckResult") -> None:
             r.add(FAIL, field, f'{value} differs from "{name}:" for {t.get("series_label")}: {entry[:80]!r}')
 
 
+# Coupon frequency ------------------------------------------------------------
+
+DEFAULT_FREQ = {"USD": 2}          # fallback only; everything else defaults to 1
+_MONTHS = ("January|February|March|April|May|June|July|August|September|"
+           "October|November|December")
+
+
+def frequency_from_wording(entry: str) -> int | None:
+    """Payments per year from an Interest Payment Dates entry:
+    "Quarterly ..." -> 4, "Semi-annually ..." -> 2, "Annually ..." -> 1, else the
+    number of distinct months listed before "of each year"."""
+    e = entry.lower()
+    if re.search(r"\bquarterly\b", e):
+        return 4
+    if re.search(r"\bsemi-?\s?annual(?:ly)?\b", e):
+        return 2
+    if re.search(r"\bmonthly\b", e):
+        return 12
+    head = re.split(r"of each year", entry, maxsplit=1, flags=re.IGNORECASE)
+    if len(head) == 2:
+        months = set(re.findall(_MONTHS, head[0]))
+        if months:
+            return len(months)
+    if re.search(r"\bannual(?:ly)?\b", e):
+        return 1
+    return None
+
+
+def coupon_frequency(text: str, series_label: str | None) -> tuple[int | None, str | None]:
+    """(payments per year, evidence) from the filing's "Interest Payment Dates"
+    row for this series: the entry under its own label, else an unlabeled row
+    that applies to every note. (None, None) if missing or unreadable."""
+    entries = section_entries(normalize_text(text), "", r"Interest Payment Dates?")
+    if not entries:
+        return None, None
+    key = series_key(series_label)
+    entry = entries.get(key) if key in entries else entries.get(ANY_SERIES)
+    if entry is None:
+        return None, None
+    freq = frequency_from_wording(entry)
+    return (freq, entry[:120]) if freq else (None, None)
+
+
 def find_date(text: str, value) -> str | None:
     d = _to_date(value)
     month = d.strftime("%B")
@@ -391,7 +440,7 @@ def _num(x):
 
 
 def check_tranche(tranche: dict, text: str, *, currency: str, settlement_date,
-                  freq: int, day_count: str | None = None,
+                  freq: int | None = None, day_count: str | None = None,
                   yield_basis: str | None = None) -> CheckResult:
     """Check one extracted tranche against its source text.
 
@@ -400,6 +449,9 @@ def check_tranche(tranche: dict, text: str, *, currency: str, settlement_date,
       issue_yield_pct, spread_bps, benchmark_yield_pct, floating_index,
       floating_margin_bps, cusip, isin, rate_type). Missing keys count as null.
     text: the filing text the values were extracted from.
+    freq: coupon payments per year. None (default) reads it from the filing's
+      Interest Payment Dates row; if that is missing, a per-currency default
+      is used and flagged WARN. evidence["coupon_frequency"] records which.
     yield_basis: "semi-annual" when the filing labels the stated yield as
       semi-annual (e.g. "Yield to Maturity (Semi-Annual / Annual)"); the yield
       from price is then converted to semi-annual before comparing. None means
@@ -409,6 +461,18 @@ def check_tranche(tranche: dict, text: str, *, currency: str, settlement_date,
     t = {k: tranche.get(k) for k in set(tranche) | set(NUMERIC_FIELDS + DATE_FIELDS + ID_FIELDS)}
     text = normalize_text(text)
     currency = (currency or "").upper()
+    if freq is None:
+        freq, freq_ev = coupon_frequency(text, t.get("series_label"))
+        if freq is None:
+            freq = DEFAULT_FREQ.get(currency, 1)
+            r.add(WARN, "coupon_frequency",
+                  f"Interest Payment Dates not found for this note; assumed {freq}/yr ({currency} default)")
+            r.evidence["coupon_frequency"] = f"{freq} (default)"
+        else:
+            r.evidence["coupon_frequency"] = f"{freq} (filing)"
+            r.evidence["coupon_frequency_series"] = freq_ev
+    else:
+        r.evidence["coupon_frequency"] = f"{freq} (given)"
     day_count = day_count or ("30/360" if currency == "USD" else "ACT/ACT")
     floating = (t.get("rate_type") or "").lower() == "floating"
 
@@ -578,3 +642,4 @@ def check_deal(tranches: list[dict], results: list[CheckResult]) -> None:
             r.add(level, "spread_bps",
                   f"spread {spread:g} bp matches {label}'s yield minus benchmark ({other:.1f} bp), not this tranche's")
             break
+

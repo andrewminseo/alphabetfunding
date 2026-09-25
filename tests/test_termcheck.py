@@ -314,3 +314,52 @@ def test_ordinal_does_not_hide_wrong_date():
          "coupon_pct": None, "maturity_date": "2026-05-15"}
     r = tc.check_tranche(t, text, currency="USD", settlement_date="2016-08-09", freq=2)
     assert any(i.field == "maturity_date" and i.level == tc.FAIL for i in r.issues)
+
+
+# --- Coupon frequency from Interest Payment Dates ---------------------------
+
+@pytest.mark.parametrize("wording,freq", [
+    ("May 15 and November 15 of each year, beginning on November 15, 2025", 2),
+    ("May 6 of each year, beginning on May 6, 2026", 1),
+    ("Semi-annually in arrears on May 15 and November 15 of each year", 2),
+    ("Quarterly in arrears on each February 10, May 10, August 10 and November 10 of each year", 4),
+    ("February 15 th and August 15 th of each year, beginning on February 15 th , 2017", 2),
+])
+def test_frequency_from_wording(wording, freq):
+    assert tc.frequency_from_wording(wording) == freq
+
+
+MULTI_IPD = (  # August 2026 layout: FRN block first, fixed block later
+    "Interest Payment Dates: | 2028 Floating Rate Notes: Quarterly in arrears on each February 10, "
+    "May 10, August 10 and November 10 of each year\nSinking Fund: | None\n"
+    "Interest Payment Dates: | 2028 Notes: February 10 and August 10 of each year "
+    "2046 Notes: February 15 and August 15 of each year\nRecord Dates: | x")
+
+
+@pytest.mark.parametrize("label,freq", [("2028 Floating Rate Notes", 4), ("2028 Notes", 2), ("2046 Notes", 2)])
+def test_frequency_per_series_across_sections(label, freq):
+    assert tc.coupon_frequency(MULTI_IPD, label)[0] == freq
+
+
+def test_unlabeled_frequency_row_applies_to_all_but_not_over_own_label():
+    text = ("Interest Payment Dates: | Quarterly in arrears on each February 15, May 15, August 15 and "
+            "November 15 of each year\nX: | y\nInterest Payment Dates: | 2028 Notes: May 15 and "
+            "November 15 of each year\nZ: | w")          # November 2025 layout
+    assert tc.coupon_frequency(text, "Floating Rate Notes")[0] == 4
+    assert tc.coupon_frequency(text, "3.875% Notes due 2028")[0] == 2
+
+
+def test_frequency_fallback_is_flagged():
+    t = {"series_label": "2030 Notes", "rate_type": "fixed", "principal": 1, "coupon_pct": 4.0,
+         "maturity_date": "2030-05-15", "issue_price_pct": 100.0, "issue_yield_pct": 4.0}
+    r = tc.check_tranche(t, "no payment dates here", currency="CAD", settlement_date="2025-05-01")
+    assert r.evidence["coupon_frequency"] == "1 (default)"
+    assert any(i.field == "coupon_frequency" and i.level == tc.WARN for i in r.issues)
+
+
+def test_frequency_read_from_filing_is_used():
+    r = tc.check_tranche(tranche(GOLDEN[0]), TEXT + "\nInterest Payment Dates: | May 15 and November 15 "
+                         "of each year\nRecord: | x", currency="USD", settlement_date=SETTLE)
+    assert r.evidence["coupon_frequency"] == "2 (filing)"
+    assert r.status == tc.PASS, r.issues
+

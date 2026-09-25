@@ -157,6 +157,7 @@ RECHECK_HTML = """<p>Pricing Term Sheet</p><table>
 <tr><td>Yield to Maturity:</td><td>2030 Notes: 4.129%</td></tr>
 <tr><td>Spread to Benchmark Treasury:</td><td>2030 Notes: T + 32 bps</td></tr>
 <tr><td>Benchmark Treasury Price and Yield:</td><td>2030 Notes: 100-09+ / 3.809%</td></tr>
+<tr><td>Interest Payment Dates:</td><td>May 15 and November 15 of each year</td></tr>
 <tr><td>CUSIP/ISIN:</td><td>2030 Notes: 02079K AK3</td></tr></table>"""
 ACC = "0001193125-25-100802"
 
@@ -195,3 +196,4 @@ def test_recheck_flags_bad_edit(tmp_path, monkeypatch):
     et.recheck(pending, audit)
     out = pd.read_csv(pending, dtype=str).fillna("").iloc[0]
     assert out["status"] == "FAIL" and "spread_bps" in out["issues"]
+

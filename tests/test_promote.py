@@ -11,7 +11,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import promote  # noqa: E402
 from extract_terms import BASE_COLS, PENDING_COLS  # noqa: E402
 
-OLD_16 = [c for c in BASE_COLS if c != "floating_margin_bps"]
+OLD_16 = [c for c in BASE_COLS if c not in ("floating_margin_bps", "coupon_frequency")]
 
 
 def row(tid, mat, cpn, status, approved, rate_type="fixed", margin=""):
@@ -36,8 +36,8 @@ def run(tmp_path, monkeypatch, pending_rows, db_cols=OLD_16):
     return pd.read_csv(db, dtype=str).fillna(""), pd.read_csv(pend, dtype=str).fillna("")
 
 
-def test_base_cols_are_16_plus_margin():
-    assert len(BASE_COLS) == 17 and BASE_COLS[-1] == "floating_margin_bps"
+def test_base_cols_are_16_plus_margin_and_frequency():
+    assert len(BASE_COLS) == 18 and BASE_COLS[-2:] == ["floating_margin_bps", "coupon_frequency"]
     assert "floating_margin_bps" in PENDING_COLS
 
 

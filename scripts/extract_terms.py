@@ -51,7 +51,7 @@ BASE_COLS = [
     "tranche_id", "issuer", "currency", "principal_local", "coupon_pct",
     "issue_price_pct", "issue_yield_pct", "benchmark", "issue_spread_bps",
     "issue_date", "maturity_date", "rate_type", "secured", "source_filing",
-    "source_url", "notes", "floating_margin_bps",
+    "source_url", "notes", "floating_margin_bps", "coupon_frequency",
 ]
 EXTRA_COLS = [
     "cusip", "isin", "benchmark_yield_pct", "underwriting_discount_pct",
@@ -303,6 +303,7 @@ def build_row(deal: Deal, t: Tranche, result: termcheck.CheckResult,
         "source_url": url,
         "notes": ranking,
         "floating_margin_bps": num(t.floating_margin_bps),
+        "coupon_frequency": result.evidence.get("coupon_frequency", "").split(" ")[0],
         "cusip": re.sub(r"\s", "", t.cusip or ""),
         "isin": re.sub(r"\s", "", t.isin or ""),
         "benchmark_yield_pct": num(t.benchmark_yield_pct, "{:.3f}"),
@@ -481,7 +482,8 @@ def recheck(pending_path: Path = None, audit_path: Path = None) -> list[tuple[st
             ccy = r["currency"].upper()
             results.append(termcheck.check_tranche(
                 t, text, currency=ccy, settlement_date=r["issue_date"] or None,
-                freq=2 if ccy == "USD" else 1, yield_basis=basis))
+                freq=int(r["coupon_frequency"]) if r.get("coupon_frequency") else None,
+                yield_basis=basis))
         termcheck.check_deal(tranches, results)
         for (i, r), res in zip(group.iterrows(), results):
             issues = "; ".join(f"{x.level} {x.field}: {x.message}" for x in res.issues)
@@ -518,7 +520,7 @@ def process(url: str, args, pending_keys: set, db_keys: set,
     print(f"\n{url}")
     raw, deal = extract(text, args.model)
     currency = (deal.currency or "").upper()
-    freq = args.freq or (2 if currency == "USD" else 1)
+    freq = args.freq  # None: each note's frequency is read from the filing
     prefix = benchmark_prefix(deal, text)
     yield_basis = yield_basis_from_text(text)
 
@@ -547,7 +549,7 @@ def process(url: str, args, pending_keys: set, db_keys: set,
     with AUDIT.open("a") as f:
         f.write(json.dumps({"url": url, "accession": accession_from_url(url),
                             "model": args.model, "run_at": date.today().isoformat(),
-                            "yield_basis": yield_basis or f"coupon frequency ({freq}/yr)",
+                            "yield_basis": yield_basis or "coupon frequency",
                             "raw_model_output": raw, "tranches": audit_tranches}) + "\n")
     return rows, new_rows
 
@@ -559,7 +561,8 @@ def main() -> None:
     p.add_argument("--index", action="store_true", help="process FWPs in data/filings_index.csv")
     p.add_argument("--model", default=DEFAULT_MODEL,
                    help=f"Ollama model (default {DEFAULT_MODEL}; needs ~10 GB free memory)")
-    p.add_argument("--freq", type=int, help="coupon frequency override (default 2 USD, 1 otherwise)")
+    p.add_argument("--freq", type=int, help="coupon frequency override for every note "
+                   "(default: read from each filing's Interest Payment Dates)")
     p.add_argument("--golden", type=Path, help="golden CSV to compare against; exits 1 on mismatch. "
                    "Writes nothing to the pending or audit files.")
     p.add_argument("--force", action="store_true",
