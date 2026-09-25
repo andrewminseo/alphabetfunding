@@ -65,3 +65,14 @@ def test_missing_fx_raises():
     with pytest.raises(ValueError, match="GBP"):
         reconcile.to_usd(
             pd.DataFrame([("X", "GBP", 1, "2026-01-01", "2030-01-01")], columns=TRANCHES.columns), FX)
+
+
+def test_fx_on_uses_the_requested_date(tmp_path):
+    h = tmp_path / "fx_history.csv"
+    pd.DataFrame([
+        ("2025-12-31", "EUR", 1.175005), ("2025-12-31", "USD", 1.0),
+        ("2026-09-23", "EUR", 1.14579), ("2026-09-23", "USD", 1.0),
+    ], columns=["date", "currency", "usd_per_unit"]).to_csv(h, index=False)
+    assert reconcile.fx_on("2025-12-31", h)["EUR"] == pytest.approx(1.175005)
+    with pytest.raises(ValueError, match="update_fx.py --date 2025-06-30"):
+        reconcile.fx_on("2025-06-30", h)

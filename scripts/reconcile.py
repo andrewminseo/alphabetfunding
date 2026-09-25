@@ -3,9 +3,13 @@ reconcile.py
 
 Compares the face value of tranches in data/tranches.csv that were outstanding
 at the period end of the latest reported LongTermDebt (data/xbrl_debt_facts.csv)
-to that reported figure, converted to USD with data/fx_rates.csv. Tranches
+to that reported figure, converted to USD. Tranches
 issued after the period end (and not matured as of --as-of) are reported
 separately, since they cannot be in the reported figure yet.
+
+Non-USD principal is converted at the period-end rate from data/fx_history.csv,
+matching how the reported figure is translated. Add a missing date with
+    python scripts/update_fx.py --date YYYY-MM-DD
 
 Face value and reported (carrying) value differ by discounts and issuance
 costs, and FX uses today's snapshot, so some gap is expected.
@@ -77,11 +81,26 @@ def reconcile(tranches: pd.DataFrame, fx: pd.Series, facts: pd.DataFrame,
     }
 
 
+def fx_on(date: str, path: Path = DATA / "fx_history.csv") -> pd.Series:
+    """USD per unit on `date` from the FX history file."""
+    if not path.exists():
+        raise ValueError(f"{path.name} not found; run: python scripts/update_fx.py --date {date}")
+    h = pd.read_csv(path, dtype={"date": str})
+    rows = h[h["date"] == date]
+    if rows.empty:
+        raise ValueError(f"no FX rates for {date} in {path.name}; "
+                         f"run: python scripts/update_fx.py --date {date}")
+    return rows.set_index("currency")["usd_per_unit"]
+
+
 def load_and_reconcile(as_of: pd.Timestamp) -> dict:
     tranches = pd.read_csv(DATA / "tranches.csv")
-    fx = pd.read_csv(DATA / "fx_rates.csv").set_index("currency")["usd_per_unit"]
     facts = pd.read_csv(DATA / "xbrl_debt_facts.csv")
-    return reconcile(tranches, fx, facts, as_of)
+    period_end = str(latest_long_term_debt(facts)["period_end"])[:10]
+    fx = fx_on(period_end)
+    r = reconcile(tranches, fx, facts, as_of)
+    r["fx_date"] = period_end
+    return r
 
 
 def print_report(r: dict) -> None:
@@ -91,6 +110,8 @@ def print_report(r: dict) -> None:
     print(f"  Reported LongTermDebt ({r['reported_period_end']}, {r['reported_accession']}): "
           f"${r['reported_ltd_usd'] / 1e9:,.2f}B")
     print(f"  Gap: {r['gap_usd'] / 1e9:+,.2f}B ({r['gap_pct']:+.1f}%)")
+    if r.get("fx_date"):
+        print(f"  FX: non-USD principal converted at {r['fx_date']} rates (data/fx_history.csv)")
     print(f"  Issued after {r['reported_period_end']} and outstanding at {r['as_of']} "
           f"({r['n_issued_after']} tranches, not in the gap): "
           f"${r['issued_after_period_end_usd'] / 1e9:,.2f}B")

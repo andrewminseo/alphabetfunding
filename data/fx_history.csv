@@ -1,0 +1,7 @@
+date,currency,usd_per_unit,rate_date,source
+2025-12-31,CAD,0.730353,2025-12-31,Frankfurter v1 (ECB reference rate)
+2025-12-31,CHF,1.261543,2025-12-31,Frankfurter v1 (ECB reference rate)
+2025-12-31,EUR,1.175005,2025-12-31,Frankfurter v1 (ECB reference rate)
+2025-12-31,GBP,1.346547,2025-12-31,Frankfurter v1 (ECB reference rate)
+2025-12-31,JPY,0.006383,2025-12-31,Frankfurter v1 (ECB reference rate)
+2025-12-31,USD,1.0,2025-12-31,Identity

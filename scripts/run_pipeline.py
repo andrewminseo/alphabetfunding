@@ -28,7 +28,7 @@ PENDING = DATA / "tranches_pending.csv"
 
 sys.path.insert(0, str(SCRIPTS))
 from extract_terms import DEFAULT_MODEL  # noqa: E402
-from reconcile import load_and_reconcile, print_report  # noqa: E402
+from reconcile import latest_long_term_debt, load_and_reconcile, print_report  # noqa: E402
 
 STEPS = [
     ["edgar_pull.py"],
@@ -63,6 +63,10 @@ def main() -> None:
 
     for step in STEPS:
         run(step)
+
+    facts = pd.read_csv(DATA / "xbrl_debt_facts.csv")
+    period_end = str(latest_long_term_debt(facts)["period_end"])[:10]
+    run(["update_fx.py", "--date", period_end])  # period-end FX for reconciliation
 
     print("\n=== reconciliation ===")
     try:
