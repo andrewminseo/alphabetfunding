@@ -197,3 +197,18 @@ def test_recheck_flags_bad_edit(tmp_path, monkeypatch):
     out = pd.read_csv(pending, dtype=str).fillna("").iloc[0]
     assert out["status"] == "FAIL" and "spread_bps" in out["issues"]
 
+
+def test_recheck_marks_exempt_rows_and_checks_others(tmp_path, monkeypatch):
+    pending, audit = recheck_env(tmp_path, monkeypatch, "47", "PASS", "yes")   # bad spread -> FAIL
+    df = pd.read_csv(pending, dtype=str).fillna("")
+    extra = df.iloc[0].copy()
+    extra["tranche_id"] = "GOOGL-2026-02-CHF-2036-SERIES"
+    pd.concat([df, extra.to_frame().T]).to_csv(pending, index=False)
+    ex = tmp_path / "ex.csv"
+    ex.write_text("tranche_id,reason,added\nGOOGL-2026-02-CHF-2036-SERIES,series-level,2026-09-25\n")
+    monkeypatch.setattr(et, "EXEMPTIONS", ex)
+    et.recheck(pending, audit)
+    out = pd.read_csv(pending, dtype=str).fillna("").set_index("tranche_id")
+    assert out.loc["GOOGL-2026-02-CHF-2036-SERIES", "status"] == "EXEMPT"
+    assert out.loc["GOOGL-2026-02-CHF-2036-SERIES", "issues"] == "exempt: series-level"
+    assert out.loc["GOOGL-2025-05-2030", "status"] == "FAIL"       # checks still run on the rest

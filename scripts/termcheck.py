@@ -33,6 +33,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
+EXEMPT = "EXEMPT"
 
 # Tolerances, in basis points unless noted.
 YIELD_OK_BP, YIELD_WARN_BP = 1.0, 3.0
@@ -643,3 +644,23 @@ def check_deal(tranches: list[dict], results: list[CheckResult]) -> None:
                   f"spread {spread:g} bp matches {label}'s yield minus benchmark ({other:.1f} bp), not this tranche's")
             break
 
+
+# Exemptions -------------------------------------------------------------------
+
+def load_exemptions(path) -> dict[str, str]:
+    """{tranche_id: reason} from a CSV with tranche_id, reason, added columns.
+    An exempt row is not checked; callers report it as EXEMPT with the reason.
+    Exemptions are per row and must give a reason; no check is switched off."""
+    import csv
+    from pathlib import Path
+    path = Path(path)
+    if not path.exists():
+        return {}
+    out = {}
+    with path.open() as f:
+        for row in csv.DictReader(f):
+            tid, reason = (row.get("tranche_id") or "").strip(), (row.get("reason") or "").strip()
+            if not tid or not reason:
+                raise ValueError(f"{path.name}: every exemption needs a tranche_id and a reason")
+            out[tid] = reason
+    return out

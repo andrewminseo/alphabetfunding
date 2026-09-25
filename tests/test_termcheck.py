@@ -363,3 +363,15 @@ def test_frequency_read_from_filing_is_used():
     assert r.evidence["coupon_frequency"] == "2 (filing)"
     assert r.status == tc.PASS, r.issues
 
+
+# --- Exemptions --------------------------------------------------------------
+
+def test_exemptions_need_a_reason(tmp_path):
+    good = tmp_path / "ex.csv"
+    good.write_text("tranche_id,reason,added\nX-SERIES,series-level row from 10-Q,2026-09-25\n")
+    assert tc.load_exemptions(good) == {"X-SERIES": "series-level row from 10-Q"}
+    bad = tmp_path / "bad.csv"
+    bad.write_text("tranche_id,reason,added\nX-SERIES,,2026-09-25\n")
+    with pytest.raises(ValueError, match="reason"):
+        tc.load_exemptions(bad)
+    assert tc.load_exemptions(tmp_path / "missing.csv") == {}

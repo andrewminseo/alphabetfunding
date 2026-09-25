@@ -42,6 +42,7 @@ RAW = DATA / "raw"
 TRANCHES = DATA / "tranches.csv"
 PENDING = DATA / "tranches_pending.csv"
 AUDIT = DATA / "extraction_audit.jsonl"
+EXEMPTIONS = DATA / "termcheck_exemptions.csv"
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 DEFAULT_MODEL = "qwen2.5:14b"
@@ -469,8 +470,15 @@ def recheck(pending_path: Path = None, audit_path: Path = None) -> list[tuple[st
     audit_path = audit_path or AUDIT
     df = pd.read_csv(pending_path, dtype=str).fillna("")
     labels = audit_labels(audit_path)
+    exempt = termcheck.load_exemptions(EXEMPTIONS)
     changes = []
-    for acc, group in df.groupby("source_accession", sort=False):
+    for i, r in df[df["tranche_id"].isin(exempt)].iterrows():
+        issues = f"exempt: {exempt[r['tranche_id']]}"
+        if (r["status"], r["issues"]) != (termcheck.EXEMPT, issues):
+            changes.append((r["tranche_id"], r["status"], termcheck.EXEMPT))
+        df.at[i, "status"], df.at[i, "issues"] = termcheck.EXEMPT, issues
+    checked = df[~df["tranche_id"].isin(exempt)]
+    for acc, group in checked.groupby("source_accession", sort=False):
         text = cached_text(acc)
         if text is None:
             print(f"  {acc}: no cached filing in {RAW.relative_to(ROOT)}; {len(group)} rows left unchanged")
