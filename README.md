@@ -8,14 +8,16 @@ As of September 25, 2026, from `scripts/treasury.py` (face value, non-USD notes 
 
 | | |
 |---|---|
-| Debt tracked | $119.0B |
-| Notes | 67 |
-| Weighted average coupon | 4.43% |
-| Weighted average maturity | 16.6 years |
+| Debt tracked | $122.8B |
+| Rows | 68 (67 notes and one CHF series, see below) |
+| Weighted average coupon | 4.32% |
+| Weighted average maturity | 16.3 years |
 | Annual coupon cost | $5.2B |
 | Maturing within five years | $30.3B |
 
-Currency mix: USD 64.3%, EUR 21.4%, GBP 6.2%, CAD 5.1%, JPY 3.1%.
+Currency mix: USD 62.3%, EUR 20.8%, GBP 6.0%, CAD 4.9%, CHF 3.1%, JPY 3.0%.
+
+The Swiss franc notes (CHF 3.1B, issued February 2026) were sold in Switzerland and not registered with the SEC, so EDGAR only has the 10-Q's summary: a 1.06% weighted average coupon, about 10 years weighted average maturity, and maturities from 2029 to 2051. They are in the database as one series-level row at 1.06% maturing in 2036, and show up as a single 2036 bar in the maturity ladder.
 
 The script also writes a maturity ladder by currency (`output/maturity_ladder.png`) and a refinancing sensitivity table (`output/refi_sensitivity.csv`).
 
@@ -23,15 +25,15 @@ Refinancing the notes that mature within five years raises annual interest cost 
 
 ## Reconciliation
 
-As a cross-check, the database is compared with the long-term debt Alphabet reports in XBRL. At December 31, 2025:
+As a cross-check, the database is compared with the total face value of long-term debt Alphabet reports (XBRL `LongTermDebt` in the 10-K, `DebtInstrumentCarryingAmount` in 10-Qs). At June 30, 2026, the latest 10-Q:
 
-- The database has $49.07B of face value across 29 notes outstanding on that date, converted at December 31, 2025 FX rates.
-- Alphabet reported $49.09B of `LongTermDebt`, which matches the total face value in the 10-K debt footnote.
-- The gap is about -$16M, from the EUR rate. The 10-K implies about 1.1762 USD per euro for its euro notes ($15,585M for €13,250M); the database uses the ECB reference rate for that date, 1.1750.
+- The database has $99.47B of face value across 59 rows outstanding on that date, converted at June 30, 2026 FX rates.
+- Alphabet reported $101.08B, which includes $1.69B of other long-term debt (credit facilities) that isn't in the note database. That leaves $99.40B of notes.
+- The gap is +$0.07B (+0.1%). Most of it is the CHF row: the 10-Q rounds the series to CHF 3.1B, while its USD amount implies about CHF 3.05B. The rest comes from using ECB rates rather than Alphabet's own.
 
-Every series in the 10-K debt footnote is now in the database. The last one added was the 2016 US dollar notes (1.998%, due August 2026), taken from the 2016 prospectus supplement and pricing term sheet. Those notes have since matured, so they count here but not in the current snapshot.
+At December 31, 2025 the gap was about -$16M, all from the EUR rate. The 10-K implies about 1.1762 USD per euro; the ECB rate for that date is 1.1750.
 
-Another $72.87B across 39 notes was issued after December 31, 2025 and is outside that comparison.
+Another $25.00B across 10 notes was issued after June 30, 2026 and is outside that comparison.
 
 The two figures aren't expected to match exactly. Missing notes, FX translation, and differences between face value and reported amounts all affect the comparison.
 
@@ -46,7 +48,7 @@ Most notes come from the pricing term sheets (FWP filings) Alphabet files for ea
 Extracted terms are not accepted automatically. Each note is checked against the source filing:
 
 - every number has to appear in the filing, and size, coupon, and maturity have to appear under that note's own label
-- the yield recalculated from the price has to match the stated yield
+- the yield recalculated from the price, on the coupon schedule stated in the filing, has to match the stated yield
 - the spread has to equal yield minus benchmark yield
 - net proceeds have to equal principal times price less the underwriting discount
 - CUSIP and ISIN check digits have to be valid
@@ -65,6 +67,8 @@ Notes without a pricing term sheet can be added by hand from the prospectus supp
 - **Face value.** The analysis uses face value, not carrying value.
 - **FX.** The current snapshot uses one FX snapshot, not issue-date rates.
 - **Coverage.** Coverage is limited to notes that are in the database. See the reconciliation above.
+- **CHF series.** The CHF notes are one row built from 10-Q averages, not individual notes. Their maturities in the ladder and their coupon are approximations until the Swiss offering terms are sourced. There's no CHF refinancing yield yet.
+- TODO: CHF principal 3,100M is provisional; derive from 10-Q USD face values at 3/31 and 6/30.
 
 ## Data sources
 
