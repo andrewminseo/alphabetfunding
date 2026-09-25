@@ -76,3 +76,33 @@ def test_fx_on_uses_the_requested_date(tmp_path):
     assert reconcile.fx_on("2025-12-31", h)["EUR"] == pytest.approx(1.175005)
     with pytest.raises(ValueError, match="update_fx.py --date 2025-06-30"):
         reconcile.fx_on("2025-06-30", h)
+
+
+def test_reported_total_falls_back_to_carrying_amount_tag():
+    facts = pd.concat([FACTS, pd.DataFrame([
+        ("DebtInstrumentCarryingAmount", "USD", 101_085_000_000, "2026-06-30", "2026-07-23", "acc-q2"),
+        ("DebtInstrumentCarryingAmount", "USD", 4_000_000_000, "2025-12-31", "2026-02-05", "acc-new"),
+    ], columns=FACTS.columns)])
+    q2 = reconcile.latest_long_term_debt(facts)
+    assert (q2["tag"], q2["value"]) == ("DebtInstrumentCarryingAmount", 101_085_000_000)
+    ye = reconcile.latest_long_term_debt(facts, "2025-12-31")
+    assert ye["tag"] == "LongTermDebt"                     # preferred when both exist
+
+
+def test_other_debt_is_separate_known_item():
+    r = reconcile.reconcile(TRANCHES, FX, FACTS, AS_OF, other_debt_usd=300_000_000)
+    assert r["reported_notes_usd"] == pytest.approx(3.7e9)
+    assert r["gap_usd"] == pytest.approx(0.0)
+    assert r["reported_ltd_usd"] == 4_000_000_000
+
+
+def test_other_long_term_debt_read_from_filing_table(tmp_path, monkeypatch):
+    html = ("<table><tr><td>2026 Japanese yen notes</td><td>2029 - 2066</td><td>0</td><td>3,566</td></tr>"
+            "<tr><td>Other long-term debt</td><td></td><td>0</td><td>1,686</td></tr></table>")
+    monkeypatch.setattr(reconcile, "RAW", tmp_path)
+    (tmp_path / "acc-q2_q.htm").write_text(html)
+    idx = tmp_path / "idx.csv"
+    pd.DataFrame([("acc-q2", "q.htm", "https://x/q.htm")],
+                 columns=["accessionNumber", "primaryDocument", "url"]).to_csv(idx, index=False)
+    value, note = reconcile.other_long_term_debt("acc-q2", idx)
+    assert value == 1_686_000_000 and "acc-q2" in note

@@ -5,3 +5,9 @@ date,currency,usd_per_unit,rate_date,source
 2025-12-31,GBP,1.346547,2025-12-31,Frankfurter v1 (ECB reference rate)
 2025-12-31,JPY,0.006383,2025-12-31,Frankfurter v1 (ECB reference rate)
 2025-12-31,USD,1.0,2025-12-31,Identity
+2026-06-30,CAD,0.702445,2026-06-30,Frankfurter v1 (ECB reference rate)
+2026-06-30,CHF,1.235254,2026-06-30,Frankfurter v1 (ECB reference rate)
+2026-06-30,EUR,1.139406,2026-06-30,Frankfurter v1 (ECB reference rate)
+2026-06-30,GBP,1.322139,2026-06-30,Frankfurter v1 (ECB reference rate)
+2026-06-30,JPY,0.006156,2026-06-30,Frankfurter v1 (ECB reference rate)
+2026-06-30,USD,1.0,2026-06-30,Identity
