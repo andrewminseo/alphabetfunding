@@ -4,7 +4,7 @@ run_pipeline.py
 Runs the full refresh in order and stops at the first error:
 
     edgar_pull.py -> extract_terms.py --index -> update_fx.py
-    -> update_yields.py -> treasury.py -> reconciliation
+    -> update_yields.py -> update_sofr.py -> treasury.py -> reconciliation
 
 Never runs promote.py: new tranches stay in data/tranches_pending.csv until
 you review and promote them yourself. Ends with a summary of new filings, new
@@ -35,6 +35,7 @@ STEPS = [
     ["extract_terms.py", "--index", "--model", DEFAULT_MODEL],
     ["update_fx.py"],
     ["update_yields.py"],
+    ["update_sofr.py"],
     ["treasury.py"],
 ]
 

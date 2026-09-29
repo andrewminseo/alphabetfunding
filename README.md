@@ -80,6 +80,7 @@ Notes without a pricing term sheet can be added by hand from the prospectus supp
 - **FX:** ECB reference rates via the Frankfurter API, current and as of the reconciliation date
 - **U.S. Treasury:** Daily Par Yield Curve Rates, saved to `data/treasury_curve.csv` for reference (not yet used in the calculations)
 - **Refinancing yields:** entered by hand in `data/market_yields.csv`, with the source on each row
+- **SOFR:** NY Fed 30-day Average SOFR, written to the SOFR row of `data/market_yields.csv` by `scripts/update_sofr.py` on each pipeline run
 
 ## Running it
 
@@ -88,8 +89,8 @@ pip install -r requirements.txt
 export SEC_USER_AGENT="Your Name you@example.com"   # SEC requires name + email
 ollama pull qwen2.5:14b                               # local model, needs ~10 GB free memory
 
-python scripts/run_pipeline.py    # pull filings, extract new term sheets, update FX and
-                                  # Treasury yields, run analysis and reconciliation
+python scripts/run_pipeline.py    # pull filings, extract new term sheets, update FX,
+                                  # Treasury yields and SOFR, run analysis and reconciliation
 # review data/tranches_pending.csv; set approved = yes on rows you've checked
 python scripts/promote.py         # approved rows -> data/tranches.csv
 python scripts/treasury.py
