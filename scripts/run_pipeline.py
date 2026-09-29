@@ -12,8 +12,11 @@ pending rows by status, rows needing review, and the reconciliation gap.
 
 Usage:
     python scripts/run_pipeline.py
+    python scripts/run_pipeline.py --skip-extract   # no Ollama; use when there
+                                                    # are no new term sheets
 """
 
+import argparse
 import subprocess
 import sys
 from pathlib import Path
@@ -59,10 +62,18 @@ def run(step: list[str]) -> None:
 
 
 def main() -> None:
+    p = argparse.ArgumentParser()
+    p.add_argument("--skip-extract", action="store_true",
+                   help="skip extract_terms.py (no Ollama needed)")
+    args = p.parse_args()
+
     index_before = read(INDEX)
     pending_before = read(PENDING)
 
     for step in STEPS:
+        if args.skip_extract and step[0] == "extract_terms.py":
+            print("\n=== extract_terms.py skipped (--skip-extract) ===", flush=True)
+            continue
         run(step)
 
     facts = pd.read_csv(DATA / "xbrl_debt_facts.csv")

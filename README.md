@@ -91,6 +91,7 @@ ollama pull qwen2.5:14b                               # local model, needs ~10 G
 
 python scripts/run_pipeline.py    # pull filings, extract new term sheets, update FX,
                                   # Treasury yields and SOFR, run analysis and reconciliation
+# python scripts/run_pipeline.py --skip-extract   # same, without Ollama, when there are no new term sheets
 # review data/tranches_pending.csv; set approved = yes on rows you've checked
 python scripts/promote.py         # approved rows -> data/tranches.csv
 python scripts/treasury.py
