@@ -14,10 +14,10 @@ What it does:
 
 The SEC requires a descriptive User-Agent with contact info.
 Set it with --user-agent or the SEC_USER_AGENT environment variable, e.g.
-    "Sara Otsuki sotsuki@umich.edu"
+    "Your Name you@example.com"
 
 Usage:
-    python scripts/edgar_pull.py --user-agent "Your Name you@umich.edu"
+    python scripts/edgar_pull.py --user-agent "Your Name you@example.com"
     python scripts/edgar_pull.py --since 2025-01-01 --forms 424B2 --download
 """
 
