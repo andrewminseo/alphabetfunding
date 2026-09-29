@@ -36,8 +36,8 @@ def run(tmp_path, monkeypatch, pending_rows, db_cols=OLD_16):
     return pd.read_csv(db, dtype=str).fillna(""), pd.read_csv(pend, dtype=str).fillna("")
 
 
-def test_base_cols_are_16_plus_margin_and_frequency():
-    assert len(BASE_COLS) == 18 and BASE_COLS[-2:] == ["floating_margin_bps", "coupon_frequency"]
+def test_base_cols_are_16_plus_margin_frequency_and_index():
+    assert len(BASE_COLS) == 19 and BASE_COLS[-3:] == ["floating_margin_bps", "coupon_frequency", "floating_index"]
     assert "floating_margin_bps" in PENDING_COLS
 
 

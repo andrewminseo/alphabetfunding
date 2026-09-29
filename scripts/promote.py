@@ -3,9 +3,9 @@ promote.py
 
 Moves reviewed rows from data/tranches_pending.csv into data/tranches.csv.
 A row moves only if approved == "yes" and status != "FAIL". Only the
-tranches.csv columns (BASE_COLS: the original 16 plus floating_margin_bps and
-coupon_frequency) are kept; a tranches.csv missing either gets the column
-added, blank for existing rows. Rows already in tranches.csv (same tranche_id,
+tranches.csv columns (BASE_COLS: the original 16 plus floating_margin_bps,
+coupon_frequency and floating_index) are kept; a tranches.csv missing any of
+them gets the column added, blank for existing rows. Rows already in tranches.csv (same tranche_id,
 or same currency + maturity_date + coupon) are skipped and left in pending.
 
 Usage:

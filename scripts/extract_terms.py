@@ -53,6 +53,7 @@ BASE_COLS = [
     "issue_price_pct", "issue_yield_pct", "benchmark", "issue_spread_bps",
     "issue_date", "maturity_date", "rate_type", "secured", "source_filing",
     "source_url", "notes", "floating_margin_bps", "coupon_frequency",
+    "floating_index",
 ]
 EXTRA_COLS = [
     "cusip", "isin", "benchmark_yield_pct", "underwriting_discount_pct",
@@ -305,6 +306,7 @@ def build_row(deal: Deal, t: Tranche, result: termcheck.CheckResult,
         "notes": ranking,
         "floating_margin_bps": num(t.floating_margin_bps),
         "coupon_frequency": result.evidence.get("coupon_frequency", "").split(" ")[0],
+        "floating_index": t.floating_index or "",
         "cusip": re.sub(r"\s", "", t.cusip or ""),
         "isin": re.sub(r"\s", "", t.isin or ""),
         "benchmark_yield_pct": num(t.benchmark_yield_pct, "{:.3f}"),
