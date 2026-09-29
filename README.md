@@ -1,6 +1,6 @@
 # Alphabet Treasury Lab
 
-Alphabet's bond debt has grown from $49.1B at the end of 2025 to $122.8B tracked today, about 2.5 times, after more than $75B of new notes in 2026. That borrowing now spans six currencies: sterling, Swiss franc, Canadian dollar and yen notes were all first issued this year, alongside USD and EUR. Deals are getting larger. The USD deals went from $5.0B in May 2025 to $17.5B in November 2025, $20.0B in February 2026 and $25.0B in August 2026. Refinancing is expensive too: the $30.3B maturing within five years carries an average rate of about 3.5%, and replacing it would raise annual interest cost by about $190M even if yields fell 100bp.
+Alphabet's bond debt has grown from $49.1B at the end of 2025 to $122.4B tracked today, about 2.5 times, after more than $75B of new notes in 2026. That borrowing now spans six currencies: sterling, Swiss franc, Canadian dollar and yen notes were all first issued this year, alongside USD and EUR. Deals are getting larger. The USD deals went from $5.0B in May 2025 to $17.5B in November 2025, $20.0B in February 2026 and $25.0B in August 2026. Refinancing is expensive too: the $30.2B maturing within five years carries an average rate of about 3.5%, and replacing it would raise annual interest cost by about $185M even if yields fell 100bp.
 
 The open question is the June 2026 equity raise. Alphabet raised about $49.5B net: $20.5B of common stock in a public offering, $10.0B in a private placement with a Berkshire Hathaway affiliate, and $19.0B of 6.25% mandatory convertible preferred stock (10-Q for June 30, 2026; underwriters' overallotment options were exercised in full, per the June 4 8-K). A separate $40B at-the-market program had no sales by June 30. It did this in the same quarter as its EUR, CAD and JPY bond deals. What this says about how much more debt Alphabet intends to carry isn't something the bond data can answer.
 
@@ -8,24 +8,24 @@ This repo is a treasury monitor built from public data. It reconstructs Alphabet
 
 ## Current snapshot
 
-As of September 29, 2026, from `scripts/treasury.py` (face value, non-USD notes converted at September 23 ECB rates, floating-rate notes costed at SOFR plus their margin):
+As of September 29, 2026, from `scripts/treasury.py` (face value, non-USD notes converted at September 29 ECB rates, floating-rate notes costed at SOFR plus their margin):
 
 | | |
 |---|---|
-| Debt tracked | $122.8B |
+| Debt tracked | $122.4B |
 | Rows | 68 (67 notes and one CHF series, see below) |
-| Weighted average coupon | 4.32% |
+| Weighted average coupon | 4.33% |
 | Weighted average maturity | 16.3 years |
 | Annual coupon cost | $5.3B |
-| Maturing within five years | $30.3B |
+| Maturing within five years | $30.2B |
 
-Currency mix: USD 62.3%, EUR 20.8%, GBP 6.0%, CAD 4.9%, CHF 3.0%, JPY 3.0%.
+Currency mix: USD 62.5%, EUR 20.7%, GBP 6.0%, CAD 4.9%, CHF 3.0%, JPY 3.0%.
 
 The Swiss franc notes (issued February 2026) were sold in Switzerland and not registered with the SEC, so EDGAR only has the 10-Q's summary: a 1.06% weighted average coupon, about 10 years weighted average maturity, and maturities from 2029 to 2051. They are in the database as one series-level row at 1.06% maturing in 2036, and show up as a single 2036 bar in the maturity ladder. The 10-Q text rounds the principal to CHF 3.1B. The row uses CHF 3,059M instead, the average of the amounts implied by the 10-Q's USD face values at March 31 ($3,833M, CHF 3,064.9M) and June 30 ($3,772M, CHF 3,053.5M) at ECB rates. The two differ by 0.37%, attributed to Alphabet translating at its own FX rates.
 
 The script also writes a maturity ladder by currency (`output/maturity_ladder.png`) and a refinancing sensitivity table (`output/refi_sensitivity.csv`).
 
-Refinancing the notes that mature within five years raises annual interest cost even if yields fall 100bp. Those notes carry an average rate of about 3.5%, below the refinancing yields used here (the latest deal in each currency). CAD and JPY are the exceptions: at -100bp their refinancing yields fall below the coupons on their maturing notes. The $1.75B of floating-rate notes is included at the NY Fed 30-day Average SOFR (3.705% on September 25, 2026) plus each note's margin.
+Refinancing the notes that mature within five years raises annual interest cost even if yields fall 100bp. Those notes carry an average rate of about 3.5%, below the refinancing yields used here (the latest deal in each currency). CAD and JPY are the exceptions: at -100bp their refinancing yields fall below the coupons on their maturing notes. The $1.75B of floating-rate notes is included at the NY Fed 30-day Average SOFR (3.739% on September 29, 2026) plus each note's margin.
 
 ## Reconciliation
 

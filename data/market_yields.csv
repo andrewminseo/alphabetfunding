@@ -4,4 +4,4 @@ EUR,3.923,2026-05-11,Principal-weighted re-offer yield of Alphabet EUR deal sett
 GBP,5.308,2026-02-13,Principal-weighted re-offer yield of Alphabet GBP deal settled 2026-02-13 (FWP 2026-02-10; 5 tranches 4.100-6.050%),refi,
 CAD,4.415,2026-05-11,Principal-weighted re-offer yield of Alphabet CAD deal settled 2026-05-11 (FWP 2026-05-05; 4 tranches 3.774-5.063%),refi,
 JPY,2.648,2026-05-21,Principal-weighted re-offer yield of Alphabet JPY deal settled 2026-05-21 (FWP 2026-05-15; 7 tranches 1.965-4.599%),refi,
-USD,3.70500,2026-09-25,"NY Fed 30-day Average SOFR, effective 2026-09-25 (https://www.newyorkfed.org/markets/reference-rates/sofr-averages-and-index; via markets.newyorkfed.org/api/rates/secured/sofrai)",index,SOFR
+USD,3.73909,2026-09-29,"NY Fed 30-day Average SOFR, effective 2026-09-29 (https://www.newyorkfed.org/markets/reference-rates/sofr-averages-and-index; via markets.newyorkfed.org/api/rates/secured/sofrai)",index,SOFR
